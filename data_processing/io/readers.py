@@ -23,6 +23,10 @@ def load_config(path: Union[str, Path]) -> ProcessingConfig:
     return ProcessingConfig(
         history_sec=float(time_cfg.get("history_sec", 8.0)),
         future_sec=float(time_cfg.get("future_sec", 3.0)),
+        fps=float(time_cfg.get("fps", 25.0)),
+        conflict_ttc_threshold=float(
+            time_cfg.get("conflict_ttc_threshold", 3.0)
+        ),
         max_distance_m=float(neighbor_cfg.get("max_distance_m", 200.0)),
         neighbor_slots=tuple(
             neighbor_cfg.get(

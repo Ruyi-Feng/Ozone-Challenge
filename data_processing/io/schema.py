@@ -11,13 +11,27 @@ import pandas as pd
 # Raw CSV (standardized input) — extend when the real format is locked
 # ---------------------------------------------------------------------------
 
+# NBDT standard trajectory format — minimum required columns for the pipeline
 RAW_REQUIRED_COLUMNS: list[str] = [
-    "scene_id",
-    "timestamp",
-    "track_id",
-    "x",
-    "y",
-    # "vx", "vy", "heading", "agent_type", ...
+    "frameNum",
+    "carId",
+    "carCenterXm",
+    "carCenterYm",
+    "heading",
+    "speed",
+    "objClass",
+]
+
+# Columns expected in the OBB data for 2D_TTC calculation (optional but recommended)
+RAW_OBB_COLUMNS: list[str] = [
+    "boundingBox1Xm",
+    "boundingBox1Ym",
+    "boundingBox2Xm",
+    "boundingBox2Ym",
+    "boundingBox3Xm",
+    "boundingBox3Ym",
+    "boundingBox4Xm",
+    "boundingBox4Ym",
 ]
 
 # ---------------------------------------------------------------------------
@@ -27,12 +41,14 @@ RAW_REQUIRED_COLUMNS: list[str] = [
 DATA_COLUMNS: list[str] = [
     "Event_id",
     "scene_id",
-    "timestamp",
+    "frameNum",
     "t_rel",
-    "track_id",
+    "carId",
     "role",  # ego | front | rear | left_front | left_rear | right_front | right_rear
-    "x",
-    "y",
+    "carCenterXm",
+    "carCenterYm",
+    "heading",
+    "speed",
 ]
 
 LABEL_COLUMNS: list[str] = [
@@ -47,11 +63,13 @@ LABEL_COLUMNS: list[str] = [
 
 FUTURE_TRAJ_COLUMNS: list[str] = [
     "Event_id",
-    "track_id",
-    "timestamp",
+    "carId",
+    "frameNum",
     "t_rel",
-    "x",
-    "y",
+    "carCenterXm",
+    "carCenterYm",
+    "heading",
+    "speed",
 ]
 
 NEIGHBOR_SLOTS: tuple[str, ...] = (
@@ -124,6 +142,8 @@ class ProcessingConfig:
 
     history_sec: float = 8.0
     future_sec: float = 3.0
+    fps: float = 25.0
+    conflict_ttc_threshold: float = 3.0  # 2D_TTC below this → conflict
     max_distance_m: float = 200.0
     neighbor_slots: tuple[str, ...] = NEIGHBOR_SLOTS
     raw_dir: str = "data/raw"
