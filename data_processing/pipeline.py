@@ -1,0 +1,143 @@
+"""
+Main processing pipeline: wire stages without embedding algorithm details.
+
+Flow
+----
+raw CSV
+  -> detect conflict / non-conflict candidates
+  -> validate 8s history + 3s future windows
+  -> filter & persistently collect neighbors
+  -> export data CSV + label CSV (+ future traj CSV)
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import List, Optional, Tuple, Union
+
+import pandas as pd
+
+from data_processing.core.conflict_detect import detect_all_candidates
+from data_processing.core.export import export_events
+from data_processing.core.neighbor_filter import extract_neighbors_for_events
+from data_processing.core.trajectory_window import build_windowed_events
+from data_processing.io.readers import list_raw_csv_files, load_config, load_raw_csv
+from data_processing.io.schema import (
+    ConflictCandidate,
+    ProcessingConfig,
+    TrackedNeighborhoodEvent,
+    WindowedEventCandidate,
+)
+from data_processing.io.writers import write_interim_candidates
+
+
+def run_conflict_stage(
+    raw_df: pd.DataFrame,
+    cfg: ProcessingConfig,
+) -> List[ConflictCandidate]:
+    """Stage 1 wrapper."""
+    return detect_all_candidates(raw_df, cfg)
+
+
+def run_window_stage(
+    raw_df: pd.DataFrame,
+    candidates: List[ConflictCandidate],
+    cfg: ProcessingConfig,
+) -> List[WindowedEventCandidate]:
+    """Stage 2 wrapper."""
+    return build_windowed_events(raw_df, candidates, cfg)
+
+
+def run_neighbor_stage(
+    raw_df: pd.DataFrame,
+    windows: List[WindowedEventCandidate],
+    cfg: ProcessingConfig,
+) -> List[TrackedNeighborhoodEvent]:
+    """Stage 3 wrapper."""
+    return extract_neighbors_for_events(raw_df, windows, cfg)
+
+
+def run_export_stage(
+    events: List[TrackedNeighborhoodEvent],
+    cfg: ProcessingConfig,
+) -> Tuple[str, str, str]:
+    """Stage 4 wrapper."""
+    return export_events(events, cfg)
+
+
+def process_raw_dataframe(
+    raw_df: pd.DataFrame,
+    cfg: ProcessingConfig,
+    *,
+    dump_interim: bool = False,
+    interim_name: str = "candidates.csv",
+) -> Tuple[str, str, str]:
+    """
+    Run full pipeline on an in-memory raw dataframe.
+
+    Returns (data_path, label_path, future_traj_path).
+    """
+    candidates = run_conflict_stage(raw_df, cfg)
+
+    if dump_interim:
+        interim_path = Path(cfg.interim_dir) / interim_name
+        rows = [
+            {
+                "scene_id": c.scene_id,
+                "ego_id": c.ego_id,
+                "is_conflict": c.is_conflict,
+                "t_conflict": c.t_conflict,
+                "conflict_target_id": c.conflict_target_id,
+            }
+            for c in candidates
+        ]
+        write_interim_candidates(pd.DataFrame(rows), interim_path)
+
+    windows = run_window_stage(raw_df, candidates, cfg)
+    tracked = run_neighbor_stage(raw_df, windows, cfg)
+    return run_export_stage(tracked, cfg)
+
+
+def process_raw_file(
+    raw_path: Union[str, Path],
+    cfg: ProcessingConfig,
+    *,
+    dump_interim: bool = False,
+) -> Tuple[str, str, str]:
+    """Load one raw CSV and run the full pipeline."""
+    raw_df = load_raw_csv(raw_path)
+    interim_name = f"{Path(raw_path).stem}_candidates.csv"
+    return process_raw_dataframe(
+        raw_df,
+        cfg,
+        dump_interim=dump_interim,
+        interim_name=interim_name,
+    )
+
+
+def run_pipeline(
+    cfg: ProcessingConfig,
+    *,
+    raw_path: Optional[Union[str, Path]] = None,
+    dump_interim: bool = False,
+) -> Tuple[str, str, str]:
+    """
+    Entry used by scripts.
+
+    If raw_path is given, process that file; otherwise process all CSVs in cfg.raw_dir
+    (current stub: first file only — multi-file merge TBD when implementing).
+    """
+    if raw_path is not None:
+        return process_raw_file(raw_path, cfg, dump_interim=dump_interim)
+
+    files = list_raw_csv_files(cfg.raw_dir)
+    if not files:
+        raise FileNotFoundError(f"No CSV found under {cfg.raw_dir}")
+
+    # Placeholder behavior: process first file. Multi-file concat/export can replace this.
+    return process_raw_file(files[0], cfg, dump_interim=dump_interim)
+
+
+def load_pipeline_config(config_path: Union[str, Path]) -> ProcessingConfig:
+    """Thin alias for script convenience."""
+    return load_config(config_path)

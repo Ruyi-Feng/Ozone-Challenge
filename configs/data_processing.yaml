@@ -1,0 +1,20 @@
+time:
+  history_sec: 8.0
+  future_sec: 3.0
+
+neighbor:
+  max_distance_m: 200.0
+  slots:
+    - front
+    - rear
+    - left_front
+    - left_rear
+    - right_front
+    - right_rear
+
+io:
+  raw_dir: data/raw
+  interim_dir: data/interim/candidates
+  data_out: data/processed/data/events_data.csv
+  label_out: data/processed/labels/events_labels.csv
+  future_traj_out: data/processed/labels/events_future_traj.csv
