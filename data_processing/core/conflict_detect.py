@@ -1,9 +1,11 @@
 """Stage 1: detect conflict and non-conflict sample candidates.
 
 Conflict detection is based on 2D_TTC (Time-To-Collision) computed from
-OBB (Oriented Bounding Box) geometry.  A pair (ego, target) is in conflict
-when 2D_TTC drops below *conflict_ttc_threshold* for one or more consecutive
-frames.
+OBB (Oriented Bounding Box) geometry, following the NBDT *ssm.py*
+reference implementation (``_compute_2d_ttc_bbox`` and helpers).
+
+A pair (ego, target) is in conflict when 2D_TTC drops below
+*conflict_ttc_threshold* for one or more consecutive frames.
 """
 
 from __future__ import annotations
@@ -21,125 +23,398 @@ from data_processing.utils.geometry import (
 )
 
 # ---------------------------------------------------------------------------
-# 2D_TTC helpers
+# Per-frame caches (cleared per detect_conflicts / sample_non_conflicts call)
 # ---------------------------------------------------------------------------
 
-# Per-frame angular velocity cache: carId -> (prev_heading_rad, dt)
+# carId -> (prev_heading_deg, dt)   for angular velocity (deg/s)
 _VELOCITY_CACHE: Dict[Any, Tuple[float, float]] = {}
 
+# carId -> (prev_speed_m_s, dt)     for scalar acceleration (m/s²)
+_ACCEL_CACHE: Dict[Any, Tuple[float, float]] = {}
 
-def _speed_vector(speed: float, heading_rad: float) -> Tuple[float, float]:
-    """Return (vx, vy) in m/s from scalar speed and heading (radians)."""
-    return (speed * math.sin(heading_rad), speed * math.cos(heading_rad))
+_EPS = 1e-6
 
+# ---------------------------------------------------------------------------
+# Geometry helpers — aligned with NBDT GeometryHelper
+# ---------------------------------------------------------------------------
 
-def _angular_velocity(
-    car_id: Any, heading_rad: float, dt: float
-) -> float:
-    """Compute angular velocity ω (rad/s) from consecutive heading readings."""
-    prev = _VELOCITY_CACHE.get(car_id)
-    _VELOCITY_CACHE[car_id] = (heading_rad, dt)
-    if prev is None:
-        return 0.0
-    prev_heading, _ = prev
-    return (heading_rad - prev_heading) / dt
+Point = Tuple[float, float]
 
 
-def _clear_velocity_cache() -> None:
-    _VELOCITY_CACHE.clear()
+def _order_rect_points(points: List[Point]) -> List[Point]:
+    """Sort 4 OBB corners into counter-clockwise order (NBDT GeometryHelper)."""
+    cx = sum(p[0] for p in points) / 4.0
+    cy = sum(p[1] for p in points) / 4.0
+    sorted_pts = sorted(points, key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
+    a, b, c, d = sorted_pts
+    cross = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    if cross > 0:
+        return [a, d, c, b]
+    return sorted_pts
 
 
-def _get_obb_corners(row: pd.Series) -> List[Tuple[float, float]]:
+def _line_segment_intersection(
+    a1: Point, a2: Point, b1: Point, b2: Point,
+) -> Optional[Point]:
+    """Intersection of two line segments.  None when parallel or disjoint."""
+    dx1, dy1 = a2[0] - a1[0], a2[1] - a1[1]
+    dx2, dy2 = b2[0] - b1[0], b2[1] - b1[1]
+    denom = dx1 * dy2 - dy1 * dx2
+    if denom == 0:
+        return None
+    dx = b1[0] - a1[0]
+    dy = b1[1] - a1[1]
+    s = (dx * dy2 - dy * dx2) / denom
+    t = (dx * dy1 - dy * dx1) / denom
+    if 0 <= s <= 1 and 0 <= t <= 1:
+        return (a1[0] + s * dx1, a1[1] + s * dy1)
+    return None
+
+
+def _is_inside_rect(point: Point, rect: List[Point]) -> bool:
+    """Point-in-convex-polygon via half-plane test (edges CCW)."""
+    for i in range(4):
+        ax, ay = rect[i]
+        bx, by = rect[(i + 1) % 4]
+        edge_dx = bx - ax
+        edge_dy = by - ay
+        # outward normal (rotate edge 90° CW for CCW polygon → inward)
+        nx, ny = edge_dy, -edge_dx
+        ap_x = point[0] - ax
+        ap_y = point[1] - ay
+        if nx * ap_x + ny * ap_y < 0:
+            return False
+    return True
+
+
+def _rectangles_intersect(rect1: List[Point], rect2: List[Point]) -> bool:
+    """Separating Axis Theorem for two convex quads."""
+    axes: List[Tuple[float, float]] = []
+    for rect in (rect1, rect2):
+        for i in range(4):
+            ax, ay = rect[i]
+            bx, by = rect[(i + 1) % 4]
+            ex, ey = bx - ax, by - ay
+            length = math.hypot(ex, ey)
+            if length == 0:
+                continue
+            axes.append((ey / length, -ex / length))
+
+    for nx, ny in axes:
+        def _proj(r):
+            return [p[0] * nx + p[1] * ny for p in r]
+        p1 = _proj(rect1)
+        p2 = _proj(rect2)
+        if max(p1) < min(p2) or max(p2) < min(p1):
+            return False
+    return True
+
+
+def _calculate_nearest_points_ordered(
+    rect1: List[Point], rect2: List[Point],
+) -> Tuple[Point, Point, float]:
+    """NBDT ``_calculate_nearest_points_ordered`` — OBB closest points + distance.
+
+    Returns (p_on_rect1, p_on_rect2, distance_m).
+    """
+    # --- Intersecting case ---
+    if _rectangles_intersect(rect1, rect2):
+        for p in rect1:
+            if _is_inside_rect(p, rect2):
+                return (p, p, 0.0)
+        for p in rect2:
+            if _is_inside_rect(p, rect1):
+                return (p, p, 0.0)
+        for i in range(4):
+            a1, a2 = rect1[i], rect1[(i + 1) % 4]
+            for j in range(4):
+                b1, b2 = rect2[j], rect2[(j + 1) % 4]
+                hit = _line_segment_intersection(a1, a2, b1, b2)
+                if hit:
+                    return (hit, hit, 0.0)
+        c1 = (sum(p[0] for p in rect1) / 4.0, sum(p[1] for p in rect1) / 4.0)
+        c2 = (sum(p[0] for p in rect2) / 4.0, sum(p[1] for p in rect2) / 4.0)
+        return (c1, c2, 0.0)
+
+    # --- Separated case: vertex→edge ---
+    min_dist = float("inf")
+    best_pa: Point = (0.0, 0.0)
+    best_pb: Point = (0.0, 0.0)
+
+    for _pass, (r_vert, r_edge) in enumerate(
+        [(rect1, rect2), (rect2, rect1)]
+    ):
+        for vi in range(4):
+            px, py = r_vert[vi]
+            for ej in range(4):
+                ax, ay = r_edge[ej]
+                bx, by = r_edge[(ej + 1) & 3]
+                ex, ey = bx - ax, by - ay
+                seg_len_sq = ex * ex + ey * ey
+                if seg_len_sq == 0.0:
+                    cx, cy = ax, ay
+                else:
+                    t = max(0.0, min(1.0, ((px - ax) * ex + (py - ay) * ey) / seg_len_sq))
+                    cx, cy = ax + t * ex, ay + t * ey
+                d = math.hypot(px - cx, py - cy)
+                if d < min_dist:
+                    min_dist = d
+                    if _pass == 0:
+                        best_pa, best_pb = (px, py), (cx, cy)
+                    else:
+                        best_pa, best_pb = (cx, cy), (px, py)
+    return best_pa, best_pb, min_dist
+
+
+def _calculate_nearest_points(
+    veh1: List[Point], veh2: List[Point],
+) -> Tuple[Point, Point, float]:
+    """NBDT ``calculate_nearest_points`` — order corners then delegate."""
+    return _calculate_nearest_points_ordered(
+        _order_rect_points(veh1), _order_rect_points(veh2),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rear-forward strip intersection — NBDT InstantSSMCalculator helpers
+# ---------------------------------------------------------------------------
+
+def _rear_edge_from_ordered_bbox(
+    ordered_bbox: List[Point], heading_deg: float,
+) -> Tuple[Point, Point]:
+    """Return the rear edge (two vertices) of a CCW-ordered OBB.
+
+    The rear edge is the one whose midpoint projects *least* along heading.
+    """
+    rad = math.radians(heading_deg)
+    fx, fy = math.cos(rad), math.sin(rad)
+    cx = sum(p[0] for p in ordered_bbox) / 4.0
+    cy = sum(p[1] for p in ordered_bbox) / 4.0
+    best = None
+    min_proj = float("inf")
+    n = len(ordered_bbox)
+    for i in range(n):
+        ax, ay = ordered_bbox[i]
+        bx, by = ordered_bbox[(i + 1) % n]
+        mx, my = 0.5 * (ax + bx), 0.5 * (ay + by)
+        proj = (mx - cx) * fx + (my - cy) * fy
+        if proj < min_proj:
+            min_proj = proj
+            best = ((ax, ay), (bx, by))
+    if best is None:
+        return ordered_bbox[0], ordered_bbox[1]
+    return best[0], best[1]
+
+
+def _point_in_forward_strip(
+    q: Point, r0: Point, r1: Point, dx: float, dy: float,
+) -> bool:
+    """Is point *q* inside the forward strip from rear edge [r0,r1] along (dx,dy)?"""
+    wx, wy = r1[0] - r0[0], r1[1] - r0[1]
+    det = wx * dy - wy * dx
+    if abs(det) < 1e-12:
+        return False
+    vx, vy = q[0] - r0[0], q[1] - r0[1]
+    a = (vx * dy - vy * dx) / det
+    t = (wx * vy - wy * vx) / det
+    return -1e-9 <= a <= 1.0 + 1e-9 and t >= -1e-9
+
+
+def _ray_intersect_segment(
+    ox: float, oy: float, dx: float, dy: float,
+    ax: float, ay: float, bx: float, by: float,
+) -> bool:
+    """Ray from (ox,oy) along (dx,dy) hits segment (a,b)?"""
+    wx, wy = bx - ax, by - ay
+    cross_dw = dx * wy - dy * wx
+    if abs(cross_dw) < 1e-12:
+        return False
+    t = ((ax - ox) * wy - (ay - oy) * wx) / cross_dw
+    u = ((ax - ox) * dy - (ay - oy) * dx) / cross_dw
+    return t >= -1e-9 and 0.0 <= u <= 1.0
+
+
+def _two_rays_intersect_forward(
+    o1x: float, o1y: float, d1x: float, d1y: float,
+    o2x: float, o2y: float, d2x: float, d2y: float,
+) -> bool:
+    """Two forward rays intersect (both t ≥ 0)?"""
+    cross_d = d1x * d2y - d1y * d2x
+    if abs(cross_d) < 1e-12:
+        return False
+    dx, dy = o2x - o1x, o2y - o1y
+    t = (dx * d2y - dy * d2x) / cross_d
+    s = (dx * d1y - dy * d1x) / cross_d
+    return t >= -1e-9 and s >= -1e-9
+
+
+def _rear_forward_strips_intersect(
+    veh1_corners: List[Point],
+    veh2_corners: List[Point],
+    heading1_deg: float,
+    heading2_deg: float,
+) -> bool:
+    """NBDT ``_rear_forward_strips_intersect``.
+
+    Checks whether the forward strip emanating from the rear edge of either
+    vehicle intersects the other vehicle — the geometric precondition for
+    a potential rear-end collision.
+
+    Four independent checks (any True → intersect):
+    1. Rear-edge vertex inside other vehicle's forward strip
+    2. Forward ray from rear-edge vertex hits other vehicle's rear-edge segment
+    3. Two forward rays (one from each vehicle's rear-edge vertex) intersect
+    4. The two rear-edge segments directly intersect
+    """
+    o1 = _order_rect_points(veh1_corners)
+    o2 = _order_rect_points(veh2_corners)
+
+    r0a, r1a = _rear_edge_from_ordered_bbox(o1, heading1_deg)
+    r0b, r1b = _rear_edge_from_ordered_bbox(o2, heading2_deg)
+
+    t1 = math.radians(heading1_deg)
+    t2 = math.radians(heading2_deg)
+    dax, day = math.cos(t1), math.sin(t1)
+    dbx, dby = math.cos(t2), math.sin(t2)
+
+    # 1. Vertex-in-strip
+    if _point_in_forward_strip(r0a, r0b, r1b, dbx, dby):
+        return True
+    if _point_in_forward_strip(r1a, r0b, r1b, dbx, dby):
+        return True
+    if _point_in_forward_strip(r0b, r0a, r1a, dax, day):
+        return True
+    if _point_in_forward_strip(r1b, r0a, r1a, dax, day):
+        return True
+
+    # 2. Ray↔segment
+    for ox, oy in (r0a, r1a):
+        if _ray_intersect_segment(ox, oy, dax, day, r0b[0], r0b[1], r1b[0], r1b[1]):
+            return True
+        # 3. Two rays
+        if _two_rays_intersect_forward(ox, oy, dax, day, r0b[0], r0b[1], dbx, dby):
+            return True
+        if _two_rays_intersect_forward(ox, oy, dax, day, r1b[0], r1b[1], dbx, dby):
+            return True
+    for ox, oy in (r0b, r1b):
+        if _ray_intersect_segment(ox, oy, dbx, dby, r0a[0], r0a[1], r1a[0], r1a[1]):
+            return True
+        if _two_rays_intersect_forward(ox, oy, dbx, dby, r0a[0], r0a[1], dax, day):
+            return True
+        if _two_rays_intersect_forward(ox, oy, dbx, dby, r1a[0], r1a[1], dax, day):
+            return True
+
+    # 4. Direct segment intersection
+    return _line_segment_intersection(r0a, r1a, r0b, r1b) is not None
+
+
+# ---------------------------------------------------------------------------
+# 2D_TTC kernel — NBDT _compute_2d_ttc_kernel + _project_to_line
+# ---------------------------------------------------------------------------
+
+def _project_to_line(
+    speed: float, accel: float, heading_deg: float, alpha: float,
+) -> Tuple[float, float]:
+    """Project scalar speed & acceleration onto direction *alpha* (radians)."""
+    delta = math.radians(heading_deg) - alpha
+    return speed * math.cos(delta), accel * math.cos(delta)
+
+
+def _compute_2d_ttc_kernel(
+    point1: Point,
+    point2: Point,
+    distance: float,
+    param1: Tuple[float, float, float, float],  # (speed, accel, heading_deg, ω_deg_s)
+    param2: Tuple[float, float, float, float],
+) -> Optional[float]:
+    """NBDT ``_compute_2d_ttc_kernel`` — closed-form 2D_TTC.
+
+    Solves  distance = closing·t + ½·a_rel·t²  for the smallest positive root.
+    Returns None when vehicles are not closing.
+    """
+    dx = point2[0] - point1[0]
+    dy = point2[1] - point1[1]
+    alpha = math.atan2(dy, dx)
+
+    v1, a1 = _project_to_line(param1[0], param1[1], param1[2], alpha)
+    v2, a2 = _project_to_line(param2[0], param2[1], param2[2], alpha)
+    v_rel = v1 - v2
+    a_rel = a1 - a2
+
+    # Angular velocity contribution (deg/s → rad/s)
+    w = math.radians(param1[3] + param2[3])
+    closing = v_rel + w * distance
+
+    if closing <= _EPS and a_rel <= _EPS:
+        return None
+
+    if abs(a_rel) < _EPS:
+        if closing <= 0:
+            return None
+        t = distance / closing
+        return t if t > 0 else None
+
+    disc = closing**2 + 2 * a_rel * distance
+    if disc < 0:
+        return None
+    sqrt_disc = math.sqrt(disc)
+    t1 = (-closing - sqrt_disc) / a_rel
+    t2 = (-closing + sqrt_disc) / a_rel
+    candidates = [t for t in (t1, t2) if t > _EPS]
+    if not candidates:
+        return None
+    return min(candidates)
+
+
+# ---------------------------------------------------------------------------
+# Row-level helpers
+# ---------------------------------------------------------------------------
+
+def _get_obb_corners(row: pd.Series) -> List[Point]:
     """Extract OBB corners in meters from a raw-data row.
 
-    Corner ordering (observed in NBDT / CitySim data):
+    Corner ordering (NBDT / CitySim data):
       0  front-right
       1  front-left
       2  rear-left
       3  rear-right
     """
     return [
-        (row["boundingBox1Xm"], row["boundingBox1Ym"]),
-        (row["boundingBox2Xm"], row["boundingBox2Ym"]),
-        (row["boundingBox3Xm"], row["boundingBox3Ym"]),
-        (row["boundingBox4Xm"], row["boundingBox4Ym"]),
+        (float(row["boundingBox1Xm"]), float(row["boundingBox1Ym"])),
+        (float(row["boundingBox2Xm"]), float(row["boundingBox2Ym"])),
+        (float(row["boundingBox3Xm"]), float(row["boundingBox3Ym"])),
+        (float(row["boundingBox4Xm"]), float(row["boundingBox4Ym"])),
     ]
 
 
-def _point_to_segment_closest(
-    px: float, py: float, ax: float, ay: float, bx: float, by: float
-) -> Tuple[float, float, float]:
-    """Closest point on segment AB to point P, and squared distance."""
-    abx, aby = bx - ax, by - ay
-    apx, apy = px - ax, py - ay
-    t = (apx * abx + apy * aby) / max(abx * abx + aby * aby, 1e-16)
-    t = max(0.0, min(1.0, t))
-    cx, cy = ax + t * abx, ay + t * aby
-    d2 = (px - cx) ** 2 + (py - cy) ** 2
-    return cx, cy, d2
+def _scalar_acceleration(car_id: Any, speed: float, dt: float) -> float:
+    """Compute scalar acceleration (m/s²) from consecutive speed readings."""
+    prev = _ACCEL_CACHE.get(car_id)
+    _ACCEL_CACHE[car_id] = (speed, dt)
+    if prev is None:
+        return 0.0
+    prev_speed, _ = prev
+    return (speed - prev_speed) / dt
 
 
-def _obb_closest_points(
-    corners_a: List[Tuple[float, float]],
-    corners_b: List[Tuple[float, float]],
-) -> Tuple[Tuple[float, float], Tuple[float, float], float]:
-    """Find the closest pair of points between two OBB rectangles.
-
-    Returns
-    -------
-    (p_a, p_b, distance)  where p_a is on OBB A, p_b on OBB B.
-    """
-    best = (None, None, float("inf"))  # type: ignore
-
-    for corners_this, corners_other in [(corners_a, corners_b), (corners_b, corners_a)]:
-        n = len(corners_this)
-        for i in range(n):
-            ax, ay = corners_this[i]
-            bx, by = corners_this[(i + 1) % n]
-            for cx, cy in corners_other:
-                px, py, d2 = _point_to_segment_closest(cx, cy, ax, ay, bx, by)
-                if d2 < best[2]:
-                    best = ((ax, ay) if corners_this is corners_a else (cx, cy),
-                            (cx, cy) if corners_this is corners_a else (ax, ay),
-                            d2)
-
-    p_a, p_b, d2 = best
-    return (p_a, p_b, math.sqrt(d2))  # type: ignore[return-value]
+def _angular_velocity(car_id: Any, heading_deg: float, dt: float) -> float:
+    """Compute angular velocity (deg/s) from consecutive heading readings."""
+    prev = _VELOCITY_CACHE.get(car_id)
+    _VELOCITY_CACHE[car_id] = (heading_deg, dt)
+    if prev is None:
+        return 0.0
+    prev_heading, _ = prev
+    return (heading_deg - prev_heading) / dt  # deg/s
 
 
-def _is_front_to_rear_contact(
-    p_ego: Tuple[float, float],
-    ego_corners: List[Tuple[float, float]],
-    ego_heading: float,
-    p_tgt: Tuple[float, float],
-    tgt_corners: List[Tuple[float, float]],
-    tgt_heading: float,
-) -> bool:
-    """Check whether the closest-approach pair involves ego's front half
-    and target's rear half.
+def _clear_caches() -> None:
+    _VELOCITY_CACHE.clear()
+    _ACCEL_CACHE.clear()
 
-    Projects each closest point onto its vehicle's heading axis and compares
-    with the OBB longitudinal midpoint.  This replaces the NBDT strip-
-    intersection check which fails when vehicle headings are (near-)parallel
-    — the most common rear-end scenario.
-    """
-    ego_hx = math.sin(ego_heading)
-    ego_hy = math.cos(ego_heading)
-    tgt_hx = math.sin(tgt_heading)
-    tgt_hy = math.cos(tgt_heading)
 
-    ego_proj = p_ego[0] * ego_hx + p_ego[1] * ego_hy
-    tgt_proj = p_tgt[0] * tgt_hx + p_tgt[1] * tgt_hy
-
-    ego_cp = [c[0] * ego_hx + c[1] * ego_hy for c in ego_corners]
-    tgt_cp = [c[0] * tgt_hx + c[1] * tgt_hy for c in tgt_corners]
-
-    ego_mid = (min(ego_cp) + max(ego_cp)) / 2.0
-    tgt_mid = (min(tgt_cp) + max(tgt_cp)) / 2.0
-
-    # ego closest point on front half, target closest point on rear half
-    return ego_proj >= ego_mid - 1e-6 and tgt_proj <= tgt_mid + 1e-6
-
+# ---------------------------------------------------------------------------
+# 2D_TTC entry point
+# ---------------------------------------------------------------------------
 
 def _compute_2d_ttc(
     ego_row: pd.Series,
@@ -148,67 +423,39 @@ def _compute_2d_ttc(
 ) -> Optional[float]:
     """Compute 2D_TTC for an ego-target pair at a single frame.
 
-    Algorithm (matching NBDT *ssm.py* `_compute_2d_ttc_kernel`):
+    Algorithm (NBDT ``_compute_2d_ttc_bbox``):
+    1. ``calculate_nearest_points`` → p_ego, p_tgt, distance
+    2. ``_rear_forward_strips_intersect`` → geometric precondition
+    3. ``_compute_2d_ttc_kernel`` → quadratic TTC
 
-    1. Find closest points *p_ego*, *p_target* on the two OBBs.
-    2. Check whether the rear strip of ego intersects the forward strip of target
-       (required for a rear-end collision geometry).
-    3. Project velocity vectors onto the closing direction *p_target → p_ego*.
-    4. Add angular velocity correction.
-    5. TTC = distance / effective_closing_speed  (zero-acceleration model).
-
-    Returns
-    -------
-    TTC in seconds, or None when no collision geometry / vehicles are separating.
+    Returns TTC in seconds, or None.
     """
     ego_corners = _get_obb_corners(ego_row)
     tgt_corners = _get_obb_corners(target_row)
 
-    # 1. Closest points
-    p_ego, p_tgt, dist = _obb_closest_points(ego_corners, tgt_corners)
-    if dist < 1e-6:
-        return 0.0  # already colliding
+    # 1. Nearest points + distance
+    p_ego, p_tgt, dist = _calculate_nearest_points(ego_corners, tgt_corners)
+    if dist <= 0:
+        return 0.0  # already colliding / intersecting
 
-    # 2. Front-rear contact check
-    #    ego is the *following* vehicle (behind), target is *ahead*.
-    #    Verify that the closest OBB points involve ego's front half
-    #    and target's rear half — works for both parallel and angled headings.
-    ego_hr = math.radians(ego_row["heading"])
-    tgt_hr = math.radians(target_row["heading"])
-    if not _is_front_to_rear_contact(
-        p_ego, ego_corners, ego_hr,
-        p_tgt, tgt_corners, tgt_hr,
-    ):
-        return None  # no front→rear collision geometry
-
-    # 3. Closing speed along p_ego → p_tgt direction
-    ego_vx, ego_vy = _speed_vector(ego_row["speed"], ego_hr)
-    tgt_vx, tgt_vy = _speed_vector(target_row["speed"], tgt_hr)
-
-    # Direction unit vector from ego to target (closing direction)
-    cx = p_tgt[0] - p_ego[0]
-    cy = p_tgt[1] - p_ego[1]
-    norm = math.hypot(cx, cy)
-    if norm < 1e-6:
+    # 2. Rear-forward strip intersection (NBDT standard)
+    ego_hdg = float(ego_row["heading"])
+    tgt_hdg = float(target_row["heading"])
+    if not _rear_forward_strips_intersect(ego_corners, tgt_corners, ego_hdg, tgt_hdg):
         return None
-    ux, uy = cx / norm, cy / norm
 
-    v_ego_proj = ego_vx * ux + ego_vy * uy
-    v_tgt_proj = tgt_vx * ux + tgt_vy * uy
-    v_rel = v_ego_proj - v_tgt_proj  # positive → ego closing on target
+    # 3. Build params: (speed, accel, heading_deg, angular_velocity_deg_per_dt)
+    ego_speed = float(ego_row["speed"])
+    tgt_speed = float(target_row["speed"])
+    ego_accel = _scalar_acceleration(ego_row["carId"], ego_speed, dt)
+    tgt_accel = _scalar_acceleration(target_row["carId"], tgt_speed, dt)
+    ego_w = _angular_velocity(ego_row["carId"], ego_hdg, dt)
+    tgt_w = _angular_velocity(target_row["carId"], tgt_hdg, dt)
 
-    # 4. Angular velocity correction
-    w_ego = _angular_velocity(ego_row["carId"], ego_hr, dt)
-    w_tgt = _angular_velocity(target_row["carId"], tgt_hr, dt)
-    v_corr = (w_ego + w_tgt) * dist  # angular contribution
+    param1 = (ego_speed, ego_accel, ego_hdg, ego_w)
+    param2 = (tgt_speed, tgt_accel, tgt_hdg, tgt_w)
 
-    closing = v_rel + v_corr
-
-    if closing <= 0:
-        return None  # separating or static
-
-    # 5. TTC under zero-acceleration assumption
-    return dist / closing
+    return _compute_2d_ttc_kernel(p_ego, p_tgt, dist, param1, param2)
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +472,8 @@ def _find_front_pairs(
     """For one frame, return (ego_id, target_id) pairs where target is ahead of ego.
 
     A pair is formed when *target* falls into one of the front slots
-    (front / left_front / right_front) relative to *ego*.
+    (front / left_front / right_front) relative to *ego* and is within
+    *max_distance_m*.
     """
     pairs: List[Tuple[Any, Any]] = []
     rows = frame_df.to_dict("records")
@@ -240,7 +488,7 @@ def _find_front_pairs(
                 ego["carCenterXm"], ego["carCenterYm"],
                 target["carCenterXm"], target["carCenterYm"],
             )
-            if not (dist <= cfg.max_distance_m):
+            if dist > cfg.max_distance_m:
                 continue
             dx, dy = compute_relative_pose(
                 ego["carCenterXm"], ego["carCenterYm"], ego["heading"],
@@ -314,7 +562,7 @@ def detect_conflicts(
     --------
     1. Group raw data by *frameNum*.
     2. Per frame, build (ego, target) pairs where target is in a front slot.
-    3. For each pair, compute 2D_TTC using OBB geometry.
+    3. For each pair, compute 2D_TTC using OBB geometry (NBDT standard).
     4. When 2D_TTC < *conflict_ttc_threshold*, record a conflict frame.
     5. Group consecutive conflict frames into events and emit ConflictCandidate.
 
@@ -322,7 +570,7 @@ def detect_conflicts(
     -------
     List[ConflictCandidate] with ``is_conflict=True``.
     """
-    _clear_velocity_cache()
+    _clear_caches()
     dt = 1.0 / cfg.fps
 
     if not _has_obb_data(raw_df):
@@ -337,7 +585,7 @@ def detect_conflicts(
         vals = raw_df["scene_id"].unique()
         scene_id = str(vals[0]) if len(vals) > 0 else "scene"
 
-    # Sort by frame
+    # Sort by frame — critical for cache correctness (per-frame sequential)
     df = raw_df.sort_values(["frameNum", "carId"]).reset_index(drop=True)
     frames = df.groupby("frameNum")
 
@@ -393,13 +641,12 @@ def sample_non_conflicts(
     For each ego vehicle, randomly sample *t0* points in safe intervals
     (where no conflict is active for that ego).  We sample roughly the same
     number of non-conflict candidates as there are conflict candidates for
-    the same ego, clamped by ``max_non_conflict_per_ego``.
+    the same ego, clamped by a per-ego cap.
 
     *exclude* lists existing conflict candidates; their ego / time
     neighbourhoods are avoided.
     """
-    _clear_velocity_cache()
-    dt = 1.0 / cfg.fps
+    _clear_caches()
     scene_id: str = "scene"
     if "scene_id" in raw_df.columns:
         vals = raw_df["scene_id"].unique()
@@ -407,24 +654,17 @@ def sample_non_conflicts(
 
     # Build exclusion set: (ego_id, frame) pairs near known conflicts
     exclude_set: Set[Tuple[Any, int]] = set()
-    conflict_ego_frames: Dict[Any, Set[int]] = {}
+    conflict_count: Dict[Any, int] = {}
     if exclude is not None:
         margin_frames = int(cfg.history_sec * cfg.fps)
         for c in exclude:
             t_c = int(c.t_conflict) if c.t_conflict is not None else -1
-            conflict_ego_frames.setdefault(c.ego_id, set()).add(t_c)
+            conflict_count[c.ego_id] = conflict_count.get(c.ego_id, 0) + 1
             for offset in range(-margin_frames, margin_frames + 1):
                 exclude_set.add((c.ego_id, t_c + offset))
 
     df = raw_df.sort_values(["frameNum", "carId"]).reset_index(drop=True)
     ego_ids = df["carId"].unique()
-    all_frames = sorted(df["frameNum"].unique())
-
-    # Count how many conflict samples per ego (to match roughly)
-    conflict_count: Dict[Any, int] = {}
-    if exclude is not None:
-        for c in exclude:
-            conflict_count[c.ego_id] = conflict_count.get(c.ego_id, 0) + 1
 
     non_conflicts: List[ConflictCandidate] = []
     max_per_ego = 20  # cap to avoid explosion
