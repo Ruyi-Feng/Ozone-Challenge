@@ -101,11 +101,13 @@ def validate_history_length(
     if ego_df.empty:
         return False
 
-    timestamps = ego_df["frameNum"].tolist()
+    # Convert frame numbers to seconds — has_continuous_coverage expects
+    # timestamps in the same unit as max_gap_sec.
+    timestamps = [f / fps for f in ego_df["frameNum"].tolist()]
     max_gap = (1.0 / fps) * 2.1  # tolerate ~2 frame gaps
 
     return has_continuous_coverage(
-        timestamps, float(t_start), float(t0), max_gap_sec=max_gap
+        timestamps, float(t_start) / fps, float(t0) / fps, max_gap_sec=max_gap
     )
 
 
