@@ -404,7 +404,8 @@ def _angular_velocity(car_id: Any, heading_deg: float, dt: float) -> float:
     if prev is None:
         return 0.0
     prev_heading, _ = prev
-    return (heading_deg - prev_heading) / dt  # deg/s
+    diff = (heading_deg - prev_heading + 180.0) % 360.0 - 180.0
+    return diff / dt  # deg/s
 
 
 def _clear_caches() -> None:

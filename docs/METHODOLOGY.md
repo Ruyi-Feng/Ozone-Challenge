@@ -281,9 +281,9 @@ extract_neighbors_for_event(raw_df, window, cfg):
 | `classify_neighbor_slot` | (dx, dy, lateral_threshold, slots) → str\|None | 根据 (longitudinal, lateral) 判定六方位 slot |
 | `is_within_max_distance` | (distance_m, max_distance_m) → bool | 距离阈值判断 |
 
-**heading 惯例**：`compute_relative_pose` 使用 heading 0°=北（+y）、顺时针增加的惯例，旋转公式为：
-- `longitudinal = dx·sin(θ) + dy·cos(θ)`（heading 方向的投影）
-- `lateral = -dx·cos(θ) + dy·sin(θ)`（垂直 heading 方向的投影）
+**heading 惯例**：`compute_relative_pose` 使用 NBDT heading 惯例 0°=东（+x）、90°=北（+y），投影公式为：
+- `longitudinal = dx·cos(θ) + dy·sin(θ)`（heading 方向的投影）
+- `lateral = -dx·sin(θ) + dy·cos(θ)`（垂直 heading 左方向的投影）
 
 ### `utils/time_utils.py` — 时间工具
 
@@ -345,15 +345,16 @@ model_baseline/
 | Writers | `io/writers.py` | ✅ 已实现 |
 | Geometry utils | `utils/geometry.py` | ✅ 已实现 |
 | Time utils | `utils/time_utils.py` | ✅ 已实现 |
-| **Stage 1** | `core/conflict_detect.py` | ✅ NBDT 标准实现，18/18 测试通过 |
+| **Stage 1** | `core/conflict_detect.py` | ✅ NBDT 标准实现，21/21 测试通过 |
 | **Stage 2** | `core/trajectory_window.py` | ✅ 已实现 |
 | **Stage 3** | `core/neighbor_filter.py` | ✅ 已实现 |
-| **Stage 4** | `core/export.py` | ✅ 已实现 |
+| **Stage 4** | `core/export.py` | ✅ 已实现（含 train/val split） |
+| Split | `core/split.py` | ✅ 按 ego_id 硬切分 train/val |
 | Pipeline | `pipeline.py` | ✅ 已实现 |
 | Scripts | `scripts/*` | ✅ 已实现 |
 | Model | `model_baseline/*` | ❌ TODO |
-| Real data | `data/raw/` | ❌ 待放入真实数据 |
-| Tests | `tests/data_processing/test_conflict_detect_fix.py` | ✅ 18/18 通过 |
+| Real data | `data/raw/` | ✅ 已有测试数据 |
+| Tests | `tests/data_processing/test_conflict_detect_fix.py` | ✅ 21/21 通过 |
 
 ---
 
@@ -406,7 +407,7 @@ model_baseline/
 
 ## 八、测试覆盖
 
-`tests/data_processing/test_conflict_detect_fix.py` — 18 个测试用例：
+`tests/data_processing/test_conflict_detect_fix.py` — 21 个测试用例：
 
 | 测试类 | 测试 | 覆盖内容 |
 |--------|------|---------|
@@ -415,3 +416,4 @@ model_baseline/
 | `Test2DTTCKernel` | 4 个 | 等速 closing、分离返回 None、加速度缩短 TTC、角速度修正 |
 | `TestCompute2DTTC` | 3 个 | 完整 TTC 入口（平行 closing、分离、多帧缓存） |
 | `TestDetectConflicts` | 3 个 | 端到端：closing 有冲突、分离无冲突、TTC>阈值无冲突 |
+| `TestAngularVelocity` | 3 个 | 正常转向、359°→1° 边界、1°→359° 反向边界 |

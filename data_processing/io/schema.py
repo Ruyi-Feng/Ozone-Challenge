@@ -146,6 +146,7 @@ class ProcessingConfig:
     conflict_ttc_threshold: float = 3.0  # 2D_TTC below this → conflict
     max_distance_m: float = 200.0
     neighbor_slots: tuple[str, ...] = NEIGHBOR_SLOTS
+    train_val_split_ratio: float | None = None  # None → no split; 0.8 → 80/20 train/val
     raw_dir: str = "data/raw"
     interim_dir: str = "data/interim/candidates"
     data_out: str = "data/processed/data/events_data.csv"

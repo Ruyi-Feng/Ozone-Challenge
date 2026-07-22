@@ -20,6 +20,9 @@ def load_config(path: Union[str, Path]) -> ProcessingConfig:
     neighbor_cfg = raw.get("neighbor", {})
     io_cfg = raw.get("io", {})
 
+    split_cfg = raw.get("split", {})
+    train_val_ratio = split_cfg.get("train_val_ratio", None)
+
     return ProcessingConfig(
         history_sec=float(time_cfg.get("history_sec", 8.0)),
         future_sec=float(time_cfg.get("future_sec", 3.0)),
@@ -34,6 +37,7 @@ def load_config(path: Union[str, Path]) -> ProcessingConfig:
                 list(ProcessingConfig.neighbor_slots),
             )
         ),
+        train_val_split_ratio=float(train_val_ratio) if train_val_ratio is not None else None,
         raw_dir=str(io_cfg.get("raw_dir", "data/raw")),
         interim_dir=str(io_cfg.get("interim_dir", "data/interim/candidates")),
         data_out=str(io_cfg.get("data_out", "data/processed/data/events_data.csv")),

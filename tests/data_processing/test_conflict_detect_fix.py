@@ -295,5 +295,42 @@ class TestDetectConflicts:
         assert len(conflicts) == 0, f"expected 0 conflicts (TTC >> threshold), got {len(conflicts)}"
 
 
+# ---------------------------------------------------------------------------
+# Angular velocity — angle wrapping
+# ---------------------------------------------------------------------------
+
+class TestAngularVelocity:
+    def test_normal_turn(self):
+        """No wrapping: heading 10° → 20° → diff = 10°."""
+        from data_processing.core.conflict_detect import _angular_velocity, _clear_caches
+        _clear_caches()
+        dt = 1.0 / 25.0
+        w0 = _angular_velocity("car1", 10.0, dt)  # first frame → 0
+        assert w0 == 0.0
+        w1 = _angular_velocity("car1", 20.0, dt)
+        assert w1 > 0
+        assert abs(w1 * dt - 10.0) < 1e-6, f"expected diff=10°, got {w1 * dt}"
+
+    def test_cross_zero_boundary(self):
+        """Heading 359° → 1° should be +2°, not -358°."""
+        from data_processing.core.conflict_detect import _angular_velocity, _clear_caches
+        _clear_caches()
+        dt = 1.0 / 25.0
+        _angular_velocity("car2", 359.0, dt)  # seed
+        w = _angular_velocity("car2", 1.0, dt)
+        assert w > 0, f"crossing 359→1 should be positive turn, got {w} deg/s"
+        assert abs(w * dt - 2.0) < 1e-6, f"expected diff=2°, got {w * dt}"
+
+    def test_cross_zero_boundary_reverse(self):
+        """Heading 1° → 359° should be -2°."""
+        from data_processing.core.conflict_detect import _angular_velocity, _clear_caches
+        _clear_caches()
+        dt = 1.0 / 25.0
+        _angular_velocity("car3", 1.0, dt)  # seed
+        w = _angular_velocity("car3", 359.0, dt)
+        assert w < 0, f"crossing 1→359 should be negative turn, got {w} deg/s"
+        assert abs(w * dt + 2.0) < 1e-6, f"expected diff=-2°, got {w * dt}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

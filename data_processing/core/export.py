@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import pandas as pd
@@ -142,18 +143,62 @@ def events_to_tables(
     return data_df, label_df, future_df
 
 
+def _suffix_path(path: str, suffix: str) -> str:
+    """Insert *suffix* before the file extension: ``data/foo.csv`` → ``data/foo_train.csv``."""
+    p = Path(path)
+    return str(p.parent / f"{p.stem}_{suffix}{p.suffix}")
+
+
 def export_events(
     events: List[TrackedNeighborhoodEvent],
     cfg: ProcessingConfig,
 ) -> Tuple[str, str, str]:
     """Assign Event_ids, build tables, write CSV files.
 
+    When ``cfg.train_val_split_ratio`` is set (0 < ratio < 1), events are
+    split by ego_id before export and separate train / val CSV files are
+    written.  Otherwise a single set of files is produced.
+
     Returns
     -------
-    (data_path, label_path, future_traj_path)
+    (data_path, label_path, future_traj_path)  — train paths when split is active.
     """
+    ratio = cfg.train_val_split_ratio
+    if ratio is not None and 0.0 < ratio < 1.0:
+        return _export_with_split(events, cfg, ratio)
+
     data_df, label_df, future_df = events_to_tables(events, cfg)
     data_path = str(write_events_data(data_df, cfg.data_out))
     label_path = str(write_events_labels(label_df, cfg.label_out))
     future_path = str(write_future_traj(future_df, cfg.future_traj_out))
     return data_path, label_path, future_path
+
+
+def _export_with_split(
+    events: List[TrackedNeighborhoodEvent],
+    cfg: ProcessingConfig,
+    train_ratio: float,
+) -> Tuple[str, str, str]:
+    """Split by ego, then export train and val tables."""
+    from data_processing.core.split import split_by_ego
+
+    train_events, val_events = split_by_ego(events, train_ratio)
+
+    # --- Train ---
+    data_train, label_train, future_train = events_to_tables(train_events, cfg)
+    train_data = str(write_events_data(data_train, _suffix_path(cfg.data_out, "train")))
+    train_label = str(write_events_labels(label_train, _suffix_path(cfg.label_out, "train")))
+    train_future = str(write_future_traj(future_train, _suffix_path(cfg.future_traj_out, "train")))
+
+    # --- Val ---
+    data_val, label_val, future_val = events_to_tables(val_events, cfg)
+    val_data = str(write_events_data(data_val, _suffix_path(cfg.data_out, "val")))
+    val_label = str(write_events_labels(label_val, _suffix_path(cfg.label_out, "val")))
+    val_future = str(write_future_traj(future_val, _suffix_path(cfg.future_traj_out, "val")))
+
+    n_train = len({e.window.ego_id for e in train_events})
+    n_val = len({e.window.ego_id for e in val_events})
+    print(f"Split: {len(train_events)} train events ({n_train} egos), "
+          f"{len(val_events)} val events ({n_val} egos)")
+
+    return train_data, train_label, train_future

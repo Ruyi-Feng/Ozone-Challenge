@@ -1,6 +1,6 @@
 # Ozone-Challenge 开发进度
 
-**最后更新**: 2026-07-20  
+**最后更新**: 2026-07-22  
 **仓库**: Ruyi-Feng/Ozone-Challenge  
 **分支**: main (本地)  
 **Git 提交**: 6 个 commit
@@ -31,15 +31,16 @@
 | — | `io/readers.py` | 读 YAML 配置、读 CSV + schema 校验 | ✅ |
 | — | `io/writers.py` | 写三类输出 CSV + interim | ✅ |
 | — | `pipeline.py` | 主线编排 (raw → 四阶段 → CSV) | ✅ |
-| Stage 1 | `core/conflict_detect.py` | NBDT 标准 2D_TTC 冲突检测，18 测试通过 | ✅ |
+| Stage 1 | `core/conflict_detect.py` | NBDT 标准 2D_TTC 冲突检测，21 测试通过 | ✅ |
 | Stage 2 | `core/trajectory_window.py` | t0 提案、8s+3s 窗口校验 | ✅ |
 | Stage 3 | `core/neighbor_filter.py` | 六方位邻车筛选、persistent track | ✅ |
-| Stage 4 | `core/export.py` | Event_id 分配、data/label/future CSV | ✅ |
+| Stage 4 | `core/export.py` | Event_id 分配、data/label/future CSV（支持 train/val split） | ✅ |
+| Split | `core/split.py` | 按 ego_id 做 train/val 硬切分，防止数据泄露 | ✅ |
 | Scripts | `scripts/run_pipeline.py` 等 4 个 | CLI 入口 | ✅ |
-| Config | `configs/data_processing.yaml` | fps, TTC阈值, 距离等参数 | ✅ |
+| Config | `configs/data_processing.yaml` | fps, TTC阈值, 距离, train/val ratio 等参数 | ✅ |
 | Docs | `docs/REPO_STRUCTURE.md` | 架构设计文档 | ✅ |
 | Docs | `docs/METHODOLOGY.md` | 完整方法论 | ✅ |
-| Tests | `tests/.../test_conflict_detect_fix.py` | 18 个测试用例 | ✅ |
+| Tests | `tests/.../test_conflict_detect_fix.py` | 21 个测试用例 | ✅ |
 
 ### ❌ 模型模块 — 全部 TODO
 
@@ -105,6 +106,14 @@
 
 **第二版（当前）**：对齐 NBDT 标准，完整实现四检查 strip 交叉 + 二次方程 TTC + 加速度差分，18/18 测试通过。
 
+**2026-07-22 Bug 修复**：
+
+| Bug | 文件 | 说明 |
+|-----|------|------|
+| Heading 约定错误 | `utils/geometry.py` | `compute_relative_pose` 使用 0°=北 的公式，但数据和 NBDT 标准为 0°=东。修复为 `longitudinal = dx·cosθ + dy·sinθ`，前后左右 slot 标签语义修正 |
+| 角速度角度回绕 | `core/conflict_detect.py` | `_angular_velocity` 未处理 359°→1° 边界，会导致 -358°/s 而非正确 +2°/s。增加 `(diff + 180) % 360 - 180` 归一化 |
+| 数据泄露 | `core/split.py` + `export.py` | 同一 ego 的多个样本间时间窗口重叠，future 可能混入其他样本的 history。新增 `split_by_ego()` 按车辆硬切分 train/val，同车所有样本只进同一集合 |
+
 ---
 
 ## 四、输出格式
@@ -125,11 +134,14 @@ Event_id="3"
 
 | 文件 | 粒度 | 内容 |
 |------|------|------|
-| `events_data.csv` | 每行=某Event某车某一帧 | history 8s 轨迹（t_rel ≤ 0），含 role 列 |
-| `events_labels.csv` | 每行=一个Event | is_conflict, conflict_target_id, t0, t_conflict |
-| `events_future_traj.csv` | 每行=某Event某车某一帧 | future 3s 轨迹（t_rel > 0），可选 |
+| `events_data_train.csv` | 每行=某Event某车某一帧 | 训练集 history 8s 轨迹（t_rel ≤ 0），含 role 列 |
+| `events_data_val.csv` | 同上 | 验证集 history 8s 轨迹 |
+| `events_labels_train.csv` | 每行=一个Event | 训练集 is_conflict, conflict_target_id, t0, t_conflict |
+| `events_labels_val.csv` | 同上 | 验证集 labels |
+| `events_future_traj_train.csv` | 每行=某Event某车某一帧 | 训练集 future 3s 轨迹（t_rel > 0） |
+| `events_future_traj_val.csv` | 同上 | 验证集 future 3s 轨迹 |
 
-通过 Event_id 关联。含冲突和非冲突两类样本（等量采样）。
+通过 Event_id 关联。含冲突和非冲突两类样本。Train/val 按 ego_id 硬切分（默认 80/20），同车所有样本只进同一集合，杜绝数据泄露。
 
 ---
 
@@ -158,8 +170,6 @@ e8e301a feat: init structure of repo (36 files, +1478)
 
 ## 六、下一步
 
-1. ❌ 获取/放入真实 NBDT 标准化轨迹 CSV 到 `data/raw/`
-2. ❌ 小样本跑全流水线验证
-3. ❌ 实现 `model_baseline/` 模块
-4. ❌ Push 到远程仓库
-5. ❌ `docs/METHODOLOGY.md` 和 `PROGRESS.md` 未提交
+1. ✅ 小样本跑全流水线验证（`_test_small.csv` 通过，33 egos, 616 events）
+2. ❌ 实现 `model_baseline/` 模块
+3. ❌ Push 到远程仓库

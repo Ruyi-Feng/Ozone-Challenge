@@ -27,9 +27,8 @@ def compute_relative_pose(
     Transform other vehicle into ego vehicle's local coordinate frame.
 
     Coordinate convention (matching NBDT / Ozone standard):
-      - heading 0   = North (+Y axis)
-      - heading 90  = East  (+X axis)
-      - heading increases clockwise
+      - heading 0   = East  (+X axis)
+      - heading 90  = North (+Y axis)
 
     Returns
     -------
@@ -42,9 +41,9 @@ def compute_relative_pose(
     theta = math.radians(ego_heading)
     dx = other_x - ego_x
     dy = other_y - ego_y
-    # Rotate (dx, dy) by -theta into ego frame
-    longitudinal = dx * math.sin(theta) + dy * math.cos(theta)
-    lateral = -dx * math.cos(theta) + dy * math.sin(theta)
+    # Project (dx, dy) onto ego forward (cosθ, sinθ) and left (-sinθ, cosθ)
+    longitudinal = dx * math.cos(theta) + dy * math.sin(theta)
+    lateral = -dx * math.sin(theta) + dy * math.cos(theta)
     return longitudinal, lateral
 
 
