@@ -63,6 +63,7 @@ LABEL_COLUMNS: list[str] = [
 
 FUTURE_TRAJ_COLUMNS: list[str] = [
     "Event_id",
+    "scene_id",
     "carId",
     "frameNum",
     "t_rel",
@@ -70,6 +71,7 @@ FUTURE_TRAJ_COLUMNS: list[str] = [
     "carCenterYm",
     "heading",
     "speed",
+    "role",
 ]
 
 NEIGHBOR_SLOTS: tuple[str, ...] = (
