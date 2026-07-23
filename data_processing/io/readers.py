@@ -51,9 +51,36 @@ def load_config(path: Union[str, Path]) -> ProcessingConfig:
     )
 
 
+# Columns that identify a CSV as NGSIM native format (rather than standardised)
+_NGSIM_MARKER_COLUMNS = {"Vehicle_ID", "Local_X", "Global_X", "v_Vel"}
+
+
+def load_ngsim_csv(
+    path: Union[str, Path],
+    *,
+    validate: bool = True,
+    scene_id: str = "peachtree",
+) -> pd.DataFrame:
+    """Read an NGSIM native 10-fps CSV and return a standardised DataFrame."""
+    from data_processing.io.ngsim_converter import convert_ngsim_to_standard
+
+    df = convert_ngsim_to_standard(path, scene_id=scene_id)
+    if validate:
+        validate_raw_schema(df)
+    return df
+
+
+def _is_ngsim_format(df: pd.DataFrame) -> bool:
+    """Return True when *df* looks like NGSIM native data."""
+    cols = set(df.columns)
+    return _NGSIM_MARKER_COLUMNS.issubset(cols)
+
+
 def load_raw_csv(path: Union[str, Path], *, validate: bool = True) -> pd.DataFrame:
-    """Read a standardized raw trajectory CSV."""
+    """Read a standardised raw trajectory CSV (auto-detects NGSIM format)."""
     df = pd.read_csv(path)
+    if _is_ngsim_format(df):
+        return load_ngsim_csv(path, validate=validate)
     if validate:
         validate_raw_schema(df)
     return df
