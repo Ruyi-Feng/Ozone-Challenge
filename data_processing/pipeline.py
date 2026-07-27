@@ -134,8 +134,33 @@ def run_pipeline(
     if not files:
         raise FileNotFoundError(f"No CSV found under {cfg.raw_dir}")
 
-    # Placeholder behavior: process first file. Multi-file concat/export can replace this.
-    return process_raw_file(files[0], cfg, dump_interim=dump_interim)
+    if len(files) == 1:
+        return process_raw_file(files[0], cfg, dump_interim=dump_interim)
+
+    # ------------------------------------------------------------------
+    # Multi-file: load, tag with scene_id, concat, then process together.
+    # This is needed for CitySim (e.g. IntersectionA-01.csv … A-12.csv)
+    # and inD datasets where one recording is split across many CSVs.
+    # ------------------------------------------------------------------
+    import pandas as pd
+
+    from data_processing.io.readers import load_raw_csv
+
+    parts: list[pd.DataFrame] = []
+    for fp in files:
+        scene_name = Path(fp).stem  # e.g. "IntersectionA-01"
+        df = load_raw_csv(fp)
+        df["scene_id"] = scene_name
+        parts.append(df)
+
+    merged = pd.concat(parts, ignore_index=True)
+    print(f"Multi-file: merged {len(files)} files → {len(merged)} rows, "
+          f"{merged['carId'].nunique()} unique vehicles")
+
+    return process_raw_dataframe(
+        merged, cfg, dump_interim=dump_interim,
+        interim_name="merged_candidates.csv",
+    )
 
 
 def load_pipeline_config(config_path: Union[str, Path]) -> ProcessingConfig:
