@@ -1,1 +1,33 @@
-# TODO: model / train hyperparams
+# Model + data are both selected by the same `model.name` string
+# via data_factory / model_factory registries.
+
+model:
+  name: baseline          # registry key → dataset form + network
+  num_agents: 7           # ego + 6 neighbor slots
+  num_features: 4         # e.g. dx, dy, heading_rel, speed
+  hidden_dim: 64
+  # num_frames: inferred from fps * history_sec, or set explicitly
+
+data:
+  data_train: data/processed/data/events_data_train.csv
+  label_train: data/processed/labels/events_labels_train.csv
+  data_val: data/processed/data/events_data_val.csv
+  label_val: data/processed/labels/events_labels_val.csv
+  # future traj is optional for this classification baseline
+  # future_train: data/processed/labels/events_future_traj_train.csv
+  # future_val: data/processed/labels/events_future_traj_val.csv
+
+train:
+  batch_size: 32
+  num_workers: 0
+  lr: 1.0e-3
+  max_epochs: 20
+  seed: 42
+  device: cpu             # cpu | cuda
+
+eval:
+  metrics:
+    - accuracy
+    - precision
+    - recall
+    - f1
