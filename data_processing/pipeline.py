@@ -43,18 +43,26 @@ def run_window_stage(
     raw_df: pd.DataFrame,
     candidates: List[ConflictCandidate],
     cfg: ProcessingConfig,
+    *,
+    car_index: dict | None = None,
 ) -> List[WindowedEventCandidate]:
     """Stage 2 wrapper."""
-    return build_windowed_events(raw_df, candidates, cfg)
+    return build_windowed_events(raw_df, candidates, cfg, car_index=car_index)
 
 
 def run_neighbor_stage(
     raw_df: pd.DataFrame,
     windows: List[WindowedEventCandidate],
     cfg: ProcessingConfig,
+    *,
+    frame_index: dict | None = None,
+    car_index: dict | None = None,
 ) -> List[TrackedNeighborhoodEvent]:
     """Stage 3 wrapper."""
-    return extract_neighbors_for_events(raw_df, windows, cfg)
+    return extract_neighbors_for_events(
+        raw_df, windows, cfg,
+        frame_index=frame_index, car_index=car_index,
+    )
 
 
 def run_export_stage(
@@ -77,7 +85,21 @@ def process_raw_dataframe(
 
     Returns (data_path, label_path, future_traj_path).
     """
+    print(f"Pipeline start: {len(raw_df)} rows, "
+          f"history={cfg.history_sec}s, future={cfg.future_sec}s")
+
     candidates = run_conflict_stage(raw_df, cfg)
+    n_conf = sum(1 for c in candidates if c.is_conflict)
+    n_non = sum(1 for c in candidates if not c.is_conflict)
+    print(f"  → {len(candidates)} candidates ({n_conf} conflict, {n_non} non-conflict)")
+
+    # Pre-build lookup indices so Stages 2–3 don't re-scan the full table.
+    # frame_index: frameNum → DataFrame slice   (used by Stage 3)
+    # car_index:   carId    → DataFrame slice   (used by Stage 2 & 3)
+    print("  building lookup indices …")
+    frame_index = dict(tuple(raw_df.groupby("frameNum")))
+    car_index = dict(tuple(raw_df.groupby("carId")))
+    print(f"  → {len(frame_index)} frame groups, {len(car_index)} vehicle groups")
 
     if dump_interim:
         interim_path = Path(cfg.interim_dir) / interim_name
@@ -92,10 +114,23 @@ def process_raw_dataframe(
             for c in candidates
         ]
         write_interim_candidates(pd.DataFrame(rows), interim_path)
+        print(f"  → interim candidates saved to {interim_path}")
 
-    windows = run_window_stage(raw_df, candidates, cfg)
-    tracked = run_neighbor_stage(raw_df, windows, cfg)
-    return run_export_stage(tracked, cfg)
+    print("  Stage 2/4: window validation …")
+    windows = run_window_stage(raw_df, candidates, cfg, car_index=car_index)
+    print(f"  → {len(windows)} windowed events")
+
+    print("  Stage 3/4: neighbor extraction …")
+    tracked = run_neighbor_stage(
+        raw_df, windows, cfg,
+        frame_index=frame_index, car_index=car_index,
+    )
+    print(f"  → {len(tracked)} tracked events")
+
+    print("  Stage 4/4: exporting …")
+    result = run_export_stage(tracked, cfg)
+    print(f"  → done")
+    return result
 
 
 def process_raw_file(

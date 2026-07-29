@@ -590,10 +590,18 @@ def detect_conflicts(
     df = raw_df.sort_values(["frameNum", "carId"]).reset_index(drop=True)
     frames = df.groupby("frameNum")
 
+    from tqdm import tqdm
+
     # Per-pair 2D_TTC time series:  (ego, target) → [(frameNum, 2D_TTC), ...]
     pair_series: Dict[Tuple[Any, Any], List[Tuple[int, Optional[float]]]] = {}
 
-    for frame_num, frame_df in frames:
+    n_frames_total = len(frames)
+    print(f"  Stage 1/4: conflict detection — {n_frames_total} frames, "
+          f"fps={cfg.fps}, TTC<{cfg.conflict_ttc_threshold}s")
+
+    for frame_num, frame_df in tqdm(
+        frames, total=n_frames_total, desc="  scanning frames", unit="frm"
+    ):
         front_pairs = _find_front_pairs(frame_df, cfg)
         for ego_id, tgt_id in front_pairs:
             key = (ego_id, tgt_id)

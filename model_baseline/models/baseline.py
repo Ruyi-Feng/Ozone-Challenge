@@ -189,7 +189,14 @@ if nn is not None:
                 conflict_logit, is_conflict.to(dtype=conflict_logit.dtype)
             )
 
-            conf_mask = is_conflict.to(dtype=torch.bool)
+            # Target loss only on conflict samples whose target is in a
+            # neighbour slot (target_idx >= 0).  When the conflict partner
+            # is outside the neighbourhood the sample still contributes to
+            # the conflict BCE but the target CE is skipped.
+            conf_mask = (
+                is_conflict.to(dtype=torch.bool)
+                & (target_idx >= 0).to(dtype=torch.bool)
+            )
             if conf_mask.any():
                 target_loss = F.cross_entropy(
                     target_logits[conf_mask],

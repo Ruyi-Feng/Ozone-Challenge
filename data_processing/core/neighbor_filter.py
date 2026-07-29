@@ -27,8 +27,18 @@ def _frame_rows(
     raw_df: pd.DataFrame,
     scene_id: str,
     frame_num: int,
+    *,
+    frame_index: dict | None = None,
 ) -> pd.DataFrame:
     """Return all rows for a given *frame_num* (optionally filtered by scene)."""
+    if frame_index is not None:
+        frame_df = frame_index.get(frame_num)
+        if frame_df is None or frame_df.empty:
+            return pd.DataFrame()
+        if "scene_id" in frame_df.columns:
+            frame_df = frame_df[frame_df["scene_id"] == scene_id]
+        return frame_df
+
     mask = raw_df["frameNum"] == frame_num
     if "scene_id" in raw_df.columns:
         mask = mask & (raw_df["scene_id"] == scene_id)
@@ -41,8 +51,28 @@ def _track_rows(
     track_ids: Set,
     t_start: float,
     t_end: float,
+    *,
+    car_index: dict | None = None,
 ) -> pd.DataFrame:
     """Return all rows for *track_ids* within [t_start, t_end]."""
+    if car_index is not None:
+        parts: list[pd.DataFrame] = []
+        for tid in track_ids:
+            car_df = car_index.get(tid)
+            if car_df is None or car_df.empty:
+                continue
+            car_df = car_df[
+                (car_df["frameNum"] >= t_start)
+                & (car_df["frameNum"] <= t_end)
+            ]
+            if "scene_id" in car_df.columns:
+                car_df = car_df[car_df["scene_id"] == scene_id]
+            if not car_df.empty:
+                parts.append(car_df)
+        if not parts:
+            return pd.DataFrame()
+        return pd.concat(parts, ignore_index=True).sort_values(["carId", "frameNum"])
+
     mask = raw_df["carId"].isin(track_ids)
     mask &= (raw_df["frameNum"] >= t_start) & (raw_df["frameNum"] <= t_end)
     if "scene_id" in raw_df.columns:
@@ -59,6 +89,8 @@ def find_entered_neighbor_ids(
     raw_df: pd.DataFrame,
     window: WindowedEventCandidate,
     cfg: ProcessingConfig,
+    *,
+    frame_index: dict | None = None,
 ) -> Set:
     """Find track_ids that ever enter ego's neighbor region during the history window.
 
@@ -74,7 +106,7 @@ def find_entered_neighbor_ids(
     entered: Set = set()
 
     for fnum in range(t_start, t_end + 1):
-        frame_df = _frame_rows(raw_df, scene, fnum)
+        frame_df = _frame_rows(raw_df, scene, fnum, frame_index=frame_index)
         ego_rows = frame_df[frame_df["carId"] == window.ego_id]
         if ego_rows.empty:
             continue
@@ -105,6 +137,8 @@ def assign_neighbor_roles(
     window: WindowedEventCandidate,
     neighbor_ids: Set,
     cfg: ProcessingConfig,
+    *,
+    frame_index: dict | None = None,
 ) -> Dict:
     """Assign each neighbor track_id to a slot.
 
@@ -121,7 +155,7 @@ def assign_neighbor_roles(
     slot_best_dist: Dict = {nid: (None, float("inf")) for nid in neighbor_ids}
 
     for fnum in range(t_start, t_end + 1):
-        frame_df = _frame_rows(raw_df, scene, fnum)
+        frame_df = _frame_rows(raw_df, scene, fnum, frame_index=frame_index)
         ego_rows = frame_df[frame_df["carId"] == window.ego_id]
         if ego_rows.empty:
             continue
@@ -165,19 +199,25 @@ def collect_persistent_tracks(
     track_ids: Set,
     t_start: float,
     t_end: float,
+    car_index: dict | None = None,
 ) -> pd.DataFrame:
     """Continuously collect trajectories for *track_ids* over [t_start, t_end].
 
     Once a vehicle entered the neighborhood, keep collecting for the full
     interval (not only frames while inside the slot).
     """
-    return _track_rows(raw_df, scene_id, track_ids, t_start, t_end)
+    return _track_rows(
+        raw_df, scene_id, track_ids, t_start, t_end, car_index=car_index,
+    )
 
 
 def extract_neighbors_for_event(
     raw_df: pd.DataFrame,
     window: WindowedEventCandidate,
     cfg: ProcessingConfig,
+    *,
+    frame_index: dict | None = None,
+    car_index: dict | None = None,
 ) -> TrackedNeighborhoodEvent:
     """Full neighbor pipeline for a single windowed event."""
     history_frames = _sec2frames(cfg.history_sec, cfg.fps)
@@ -186,10 +226,14 @@ def extract_neighbors_for_event(
     t0 = window.t0
 
     # 1. Find which vehicles ever entered ego's neighborhood
-    neighbor_ids = find_entered_neighbor_ids(raw_df, window, cfg)
+    neighbor_ids = find_entered_neighbor_ids(
+        raw_df, window, cfg, frame_index=frame_index,
+    )
 
     # 2. Assign roles
-    roles = assign_neighbor_roles(raw_df, window, neighbor_ids, cfg)
+    roles = assign_neighbor_roles(
+        raw_df, window, neighbor_ids, cfg, frame_index=frame_index,
+    )
 
     # 3. Determine conflict target role (if applicable)
     conflict_target_role: Optional[str] = None  # noqa: F821
@@ -212,6 +256,7 @@ def extract_neighbors_for_event(
         track_ids=all_ids,
         t_start=float(t0 - history_frames),
         t_end=float(t0),
+        car_index=car_index,
     )
     future_tracks = collect_persistent_tracks(
         raw_df,
@@ -219,6 +264,7 @@ def extract_neighbors_for_event(
         track_ids=all_ids,
         t_start=float(t0),
         t_end=float(t0 + future_frames),
+        car_index=car_index,
     )
 
     return TrackedNeighborhoodEvent(
@@ -234,6 +280,17 @@ def extract_neighbors_for_events(
     raw_df: pd.DataFrame,
     windows: List[WindowedEventCandidate],
     cfg: ProcessingConfig,
+    *,
+    frame_index: dict | None = None,
+    car_index: dict | None = None,
 ) -> List[TrackedNeighborhoodEvent]:
     """Run neighbor extraction for all windowed events."""
-    return [extract_neighbors_for_event(raw_df, w, cfg) for w in windows]
+    from tqdm import tqdm
+
+    results: List[TrackedNeighborhoodEvent] = []
+    for w in tqdm(windows, desc="  extracting neighbors", unit="evt"):
+        results.append(extract_neighbors_for_event(
+            raw_df, w, cfg,
+            frame_index=frame_index, car_index=car_index,
+        ))
+    return results

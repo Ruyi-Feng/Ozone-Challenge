@@ -9,3 +9,6 @@ pyyaml>=6.0
 # Model training (model_baseline/)
 torch>=2.0.0
 # scikit-learn>=1.3.0
+
+# Progress
+tqdm>=4.60
