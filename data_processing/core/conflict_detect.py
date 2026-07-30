@@ -13,14 +13,10 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import numpy as np
 import pandas as pd
 
 from data_processing.io.schema import ConflictCandidate, ProcessingConfig
-from data_processing.utils.geometry import (
-    classify_neighbor_slot,
-    compute_distance,
-    compute_relative_pose,
-)
 
 # ---------------------------------------------------------------------------
 # Per-frame caches (cleared per detect_conflicts / sample_non_conflicts call)
@@ -472,33 +468,52 @@ def _find_front_pairs(
 ) -> List[Tuple[Any, Any]]:
     """For one frame, return (ego_id, target_id) pairs where target is ahead of ego.
 
+    Vectorised with numpy broadcasting — O(N²) in C, not Python.
     A pair is formed when *target* falls into one of the front slots
     (front / left_front / right_front) relative to *ego* and is within
     *max_distance_m*.
     """
-    pairs: List[Tuple[Any, Any]] = []
-    rows = frame_df.to_dict("records")
-    n = len(rows)
-    for i in range(n):
-        ego = rows[i]
-        for j in range(n):
-            if i == j:
-                continue
-            target = rows[j]
-            dist = compute_distance(
-                ego["carCenterXm"], ego["carCenterYm"],
-                target["carCenterXm"], target["carCenterYm"],
-            )
-            if dist > cfg.max_distance_m:
-                continue
-            dx, dy = compute_relative_pose(
-                ego["carCenterXm"], ego["carCenterYm"], ego["heading"],
-                target["carCenterXm"], target["carCenterYm"],
-            )
-            slot = classify_neighbor_slot(dx, dy, slots=cfg.neighbor_slots)
-            if slot in _FRONT_SLOTS:
-                pairs.append((ego["carId"], target["carId"]))
-    return pairs
+    n = len(frame_df)
+    if n < 2:
+        return []
+
+    # --- extract columns as numpy arrays ---
+    x = frame_df["carCenterXm"].to_numpy(dtype=np.float64)
+    y = frame_df["carCenterYm"].to_numpy(dtype=np.float64)
+    heading = frame_df["heading"].to_numpy(dtype=np.float64)
+    car_ids = frame_df["carId"].values
+
+    # --- pairwise dx, dy: dx[i, j] = x_j - x_i ---
+    dx = x[np.newaxis, :] - x[:, np.newaxis]
+    dy = y[np.newaxis, :] - y[:, np.newaxis]
+
+    # --- distance matrix ---
+    dist = np.hypot(dx, dy)
+
+    # --- mask: i != j, within max_distance ---
+    valid = (dist > 0.0) & (dist <= cfg.max_distance_m)
+    if not np.any(valid):
+        return []
+
+    # --- rotate (dx, dy) into each ego's local frame ---
+    theta = np.radians(heading)
+    cos_t = np.cos(theta)
+    sin_t = np.sin(theta)
+
+    # longitudinal[i,j]: how far ahead target j is from ego i
+    long_mat = dx * cos_t[:, np.newaxis] + dy * sin_t[:, np.newaxis]
+
+    # "front slot" ⇔ target is ahead of ego (longitudinal ≥ 0).
+    # All three front variants (front / left_front / right_front) share this
+    # condition; the lateral split only matters for slot naming in Stage 3.
+    valid &= long_mat >= 0.0
+
+    if not np.any(valid):
+        return []
+
+    # --- extract (ego_idx, tgt_idx) pairs ---
+    ego_idx, tgt_idx = np.where(valid)
+    return [(car_ids[i], car_ids[j]) for i, j in zip(ego_idx, tgt_idx)]
 
 
 # ---------------------------------------------------------------------------
@@ -603,13 +618,20 @@ def detect_conflicts(
         frames, total=n_frames_total, desc="  scanning frames", unit="frm"
     ):
         front_pairs = _find_front_pairs(frame_df, cfg)
+
+        # Build O(1) carId → positional-index lookup once per frame
+        # (avoids repeated boolean-mask scans in the hot pair loop below).
+        car_ids = frame_df["carId"].values
+        car_pos: dict = {cid: i for i, cid in enumerate(car_ids)}
+
         for ego_id, tgt_id in front_pairs:
             key = (ego_id, tgt_id)
-            try:
-                ego_row = frame_df.loc[frame_df["carId"] == ego_id].iloc[0]
-                tgt_row = frame_df.loc[frame_df["carId"] == tgt_id].iloc[0]
-            except IndexError:
+            ego_pos = car_pos.get(ego_id)
+            tgt_pos = car_pos.get(tgt_id)
+            if ego_pos is None or tgt_pos is None:
                 continue
+            ego_row = frame_df.iloc[ego_pos]
+            tgt_row = frame_df.iloc[tgt_pos]
             ttc = _compute_2d_ttc(ego_row, tgt_row, dt)
             pair_series.setdefault(key, []).append((int(frame_num), ttc))
 

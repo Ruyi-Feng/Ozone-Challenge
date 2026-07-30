@@ -23,7 +23,7 @@ train:
   lr: 1.0e-3
   max_epochs: 20
   seed: 42
-  device: cpu             # cpu | cuda
+  device: cuda             # cpu | cuda
 
 eval:
   metrics:
