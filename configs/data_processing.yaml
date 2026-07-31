@@ -2,7 +2,7 @@ time:
   history_sec: 8.0
   future_sec: 3.0
   fps: 25.0  # 10 Hz for NGSIM native data; use 25.0 for upsampled NBDT data
-  conflict_ttc_threshold: 3.0
+  conflict_ttc_threshold: 1.5
 
 neighbor:
   max_distance_m: 200.0

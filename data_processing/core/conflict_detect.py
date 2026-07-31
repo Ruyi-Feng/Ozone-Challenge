@@ -698,7 +698,7 @@ def sample_non_conflicts(
     ego_ids = df["carId"].unique()
 
     non_conflicts: List[ConflictCandidate] = []
-    max_per_ego = 20  # cap to avoid explosion
+    max_per_ego = 500  # cap to avoid explosion
 
     for ego_id in ego_ids:
         ego_mask = df["carId"] == ego_id
@@ -707,7 +707,7 @@ def sample_non_conflicts(
             continue
 
         n_target = min(
-            conflict_count.get(ego_id, max(3, len(ego_frames) // 100)),
+            int(conflict_count.get(ego_id, max(3, len(ego_frames) // 100)) * 1.8),
             max_per_ego,
         )
         safe_frames = [
