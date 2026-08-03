@@ -15,6 +15,7 @@ from data_processing.io.schema import (
     TrackedNeighborhoodEvent,
 )
 from data_processing.io.writers import (
+    _ensure_parent,
     write_events_data,
     write_events_labels,
     write_future_traj,
@@ -50,19 +51,13 @@ def _add_common_columns(
     df["role"] = df["carId"].apply(
         lambda cid: "ego" if cid == ego_id else roles.get(cid, "other")
     )
-    # Keep only columns in DATA_COLUMNS (plus original ones that match)
-    out_cols = [c for c in DATA_COLUMNS if c in df.columns]
-    for c in ["carCenterXm", "carCenterYm", "heading", "speed", "frameNum", "carId", "role", "t_rel", "Event_id", "scene_id"]:
-        if c not in out_cols and c in df.columns:
-            out_cols.append(c)
-    # Ensure scene_id
+    # scene_id is injected during multi-file merge (pipeline.py).
+    # Only add the fallback for single-file paths that never got it.
     if "scene_id" not in df.columns:
-        scene = "scene"
-        if "scene_id" in df.columns:
-            pass  # already handled
-        else:
-            df["scene_id"] = "scene"
-    return df[DATA_COLUMNS] if all(c in df.columns for c in DATA_COLUMNS) else df
+        df["scene_id"] = "scene"
+    # Keep only DATA_COLUMNS that exist in df
+    keep = [c for c in DATA_COLUMNS if c in df.columns]
+    return df[keep]
 
 
 def build_event_data_rows(
@@ -128,9 +123,15 @@ def build_future_traj_rows(
 def events_to_tables(
     events: List[TrackedNeighborhoodEvent],
     cfg: ProcessingConfig,
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Convert tracked events into (data_df, label_df, future_traj_df)."""
-    labeled = assign_event_ids(events)
+    *,
+    start_id: int = 0,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, int]:
+    """Convert tracked events into (data_df, label_df, future_traj_df, next_id).
+
+    *start_id* controls the first Event_id assigned; returns *next_id* so
+    callers can chain multiple batches with sequential IDs.
+    """
+    labeled = assign_event_ids(events, start_id=start_id)
     data_parts, label_rows, future_parts = [], [], []
     for eid, evt in labeled:
         data_parts.append(build_event_data_rows(eid, evt, cfg))
@@ -140,13 +141,66 @@ def events_to_tables(
     data_df = pd.concat(data_parts, ignore_index=True) if data_parts else pd.DataFrame(columns=DATA_COLUMNS)
     label_df = pd.DataFrame(label_rows, columns=LABEL_COLUMNS) if label_rows else pd.DataFrame(columns=LABEL_COLUMNS)
     future_df = pd.concat(future_parts, ignore_index=True) if future_parts else pd.DataFrame(columns=FUTURE_TRAJ_COLUMNS)
-    return data_df, label_df, future_df
+    next_id = start_id + len(events)
+    return data_df, label_df, future_df, next_id
 
 
 def _suffix_path(path: str, suffix: str) -> str:
     """Insert *suffix* before the file extension: ``data/foo.csv`` → ``data/foo_train.csv``."""
     p = Path(path)
     return str(p.parent / f"{p.stem}_{suffix}{p.suffix}")
+
+
+def suffix_path(path: str, suffix: str) -> str:
+    """Public alias for _suffix_path, used by pipeline chunking."""
+    return _suffix_path(path, suffix)
+
+
+def write_csv_headers(cfg: ProcessingConfig) -> None:
+    """Initialize output CSV files with column headers only."""
+    for path, columns in [
+        (cfg.data_out, DATA_COLUMNS),
+        (cfg.label_out, LABEL_COLUMNS),
+        (cfg.future_traj_out, FUTURE_TRAJ_COLUMNS),
+    ]:
+        _ensure_parent(path)
+        pd.DataFrame(columns=columns).to_csv(path, index=False)
+
+
+def write_csv_headers_split(cfg: ProcessingConfig) -> None:
+    """Initialize train/val output CSV files with column headers only."""
+    for suffix in ("train", "val"):
+        for path, columns in [
+            (cfg.data_out, DATA_COLUMNS),
+            (cfg.label_out, LABEL_COLUMNS),
+            (cfg.future_traj_out, FUTURE_TRAJ_COLUMNS),
+        ]:
+            sp = _suffix_path(path, suffix)
+            _ensure_parent(sp)
+            pd.DataFrame(columns=columns).to_csv(sp, index=False)
+
+
+def export_chunk(
+    events: List[TrackedNeighborhoodEvent],
+    cfg: ProcessingConfig,
+    data_path: str,
+    label_path: str,
+    future_path: str,
+    start_id: int = 0,
+) -> int:
+    """Export a chunk of events by appending to existing CSV files.
+
+    Returns the next available *start_id* for the following chunk.
+    """
+    if not events:
+        return start_id
+    data_df, label_df, future_df, next_id = events_to_tables(
+        events, cfg, start_id=start_id,
+    )
+    data_df.to_csv(data_path, mode="a", header=False, index=False)
+    label_df.to_csv(label_path, mode="a", header=False, index=False)
+    future_df.to_csv(future_path, mode="a", header=False, index=False)
+    return next_id
 
 
 def export_events(
@@ -167,7 +221,7 @@ def export_events(
     if ratio is not None and 0.0 < ratio < 1.0:
         return _export_with_split(events, cfg, ratio)
 
-    data_df, label_df, future_df = events_to_tables(events, cfg)
+    data_df, label_df, future_df, _ = events_to_tables(events, cfg)
     data_path = str(write_events_data(data_df, cfg.data_out))
     label_path = str(write_events_labels(label_df, cfg.label_out))
     future_path = str(write_future_traj(future_df, cfg.future_traj_out))
@@ -185,13 +239,13 @@ def _export_with_split(
     train_events, val_events = split_by_ego(events, train_ratio)
 
     # --- Train ---
-    data_train, label_train, future_train = events_to_tables(train_events, cfg)
+    data_train, label_train, future_train, _ = events_to_tables(train_events, cfg)
     train_data = str(write_events_data(data_train, _suffix_path(cfg.data_out, "train")))
     train_label = str(write_events_labels(label_train, _suffix_path(cfg.label_out, "train")))
     train_future = str(write_future_traj(future_train, _suffix_path(cfg.future_traj_out, "train")))
 
     # --- Val ---
-    data_val, label_val, future_val = events_to_tables(val_events, cfg)
+    data_val, label_val, future_val, _ = events_to_tables(val_events, cfg)
     val_data = str(write_events_data(data_val, _suffix_path(cfg.data_out, "val")))
     val_label = str(write_events_labels(label_val, _suffix_path(cfg.label_out, "val")))
     val_future = str(write_future_traj(future_val, _suffix_path(cfg.future_traj_out, "val")))

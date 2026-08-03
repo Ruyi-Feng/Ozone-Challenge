@@ -468,11 +468,28 @@ def _find_front_pairs(
 ) -> List[Tuple[Any, Any]]:
     """For one frame, return (ego_id, target_id) pairs where target is ahead of ego.
 
+    When *frame_df* contains vehicles from multiple scenes (multi-file merge),
+    pairs are formed within each scene independently to avoid cross-scene
+    contamination.
+
     Vectorised with numpy broadcasting — O(N²) in C, not Python.
     A pair is formed when *target* falls into one of the front slots
     (front / left_front / right_front) relative to *ego* and is within
     *max_distance_m*.
     """
+    if "scene_id" in frame_df.columns:
+        pairs: List[Tuple[Any, Any]] = []
+        for _, scene_df in frame_df.groupby("scene_id"):
+            pairs.extend(_find_front_pairs_single(scene_df, cfg))
+        return pairs
+    return _find_front_pairs_single(frame_df, cfg)
+
+
+def _find_front_pairs_single(
+    frame_df: pd.DataFrame,
+    cfg: ProcessingConfig,
+) -> List[Tuple[Any, Any]]:
+    """Vectorised pair building for a single scene (no cross-scene pairs)."""
     n = len(frame_df)
     if n < 2:
         return []
@@ -574,8 +591,12 @@ def detect_conflicts(
 ) -> List[ConflictCandidate]:
     """Detect conflict events from standardized trajectories.
 
-    Workflow
-    --------
+    When *raw_df* spans multiple scenes (``scene_id`` column present),
+    each scene is processed independently to avoid cross-scene vehicle
+    pairing.  Caches (velocity / acceleration) are cleared between scenes.
+
+    Workflow (per scene)
+    --------------------
     1. Group raw data by *frameNum*.
     2. Per frame, build (ego, target) pairs where target is in a front slot.
     3. For each pair, compute 2D_TTC using OBB geometry (NBDT standard).
@@ -586,20 +607,35 @@ def detect_conflicts(
     -------
     List[ConflictCandidate] with ``is_conflict=True``.
     """
-    _clear_caches()
-    dt = 1.0 / cfg.fps
-
     if not _has_obb_data(raw_df):
         raise ValueError(
             "OBB corner columns (boundingBox1Xm..4Ym) missing from raw data. "
             "2D_TTC requires OBB geometry."
         )
 
-    # Derive scene_id from dataframe if present, else use fallback
-    scene_id: str = "scene"
     if "scene_id" in raw_df.columns:
-        vals = raw_df["scene_id"].unique()
-        scene_id = str(vals[0]) if len(vals) > 0 else "scene"
+        all_candidates: List[ConflictCandidate] = []
+        scene_names = sorted(raw_df["scene_id"].unique())
+        for scene_id in scene_names:
+            _clear_caches()
+            scene_df = raw_df[raw_df["scene_id"] == scene_id]
+            candidates = _detect_conflicts_one_scene(
+                scene_df, cfg, scene_id=str(scene_id),
+            )
+            all_candidates.extend(candidates)
+        return all_candidates
+
+    return _detect_conflicts_one_scene(raw_df, cfg, "scene")
+
+
+def _detect_conflicts_one_scene(
+    raw_df: pd.DataFrame,
+    cfg: ProcessingConfig,
+    scene_id: str,
+) -> List[ConflictCandidate]:
+    """Core detection logic for a single scene.  See ``detect_conflicts``."""
+    _clear_caches()
+    dt = 1.0 / cfg.fps
 
     # Sort by frame — critical for cache correctness (per-frame sequential)
     df = raw_df.sort_values(["frameNum", "carId"]).reset_index(drop=True)
@@ -612,7 +648,8 @@ def detect_conflicts(
 
     n_frames_total = len(frames)
     print(f"  Stage 1/4: conflict detection — {n_frames_total} frames, "
-          f"fps={cfg.fps}, TTC<{cfg.conflict_ttc_threshold}s")
+          f"fps={cfg.fps}, TTC<{cfg.conflict_ttc_threshold}s"
+          f"{' (scene ' + scene_id + ')' if scene_id != 'scene' else ''}")
 
     for frame_num, frame_df in tqdm(
         frames, total=n_frames_total, desc="  scanning frames", unit="frm"
@@ -667,6 +704,9 @@ def sample_non_conflicts(
 ) -> List[ConflictCandidate]:
     """Sample non-conflict candidates under the same windowing assumptions.
 
+    When *raw_df* spans multiple scenes each scene is sampled independently
+    so that ego_ids from different scenes do not leak.
+
     Strategy
     --------
     For each ego vehicle, randomly sample *t0* points in safe intervals
@@ -677,11 +717,31 @@ def sample_non_conflicts(
     *exclude* lists existing conflict candidates; their ego / time
     neighbourhoods are avoided.
     """
-    _clear_caches()
-    scene_id: str = "scene"
     if "scene_id" in raw_df.columns:
-        vals = raw_df["scene_id"].unique()
-        scene_id = str(vals[0]) if len(vals) > 0 else "scene"
+        all_non: List[ConflictCandidate] = []
+        for scene_id in sorted(raw_df["scene_id"].unique()):
+            scene_df = raw_df[raw_df["scene_id"] == scene_id]
+            scene_exclude = (
+                [c for c in exclude if c.scene_id == scene_id]
+                if exclude else None
+            )
+            all_non.extend(_sample_non_conflicts_one_scene(
+                scene_df, cfg, exclude=scene_exclude, scene_id=str(scene_id),
+            ))
+        return all_non
+
+    return _sample_non_conflicts_one_scene(raw_df, cfg, exclude=exclude, scene_id="scene")
+
+
+def _sample_non_conflicts_one_scene(
+    raw_df: pd.DataFrame,
+    cfg: ProcessingConfig,
+    *,
+    exclude: Optional[List[ConflictCandidate]] = None,
+    scene_id: str = "scene",
+) -> List[ConflictCandidate]:
+    """Core non-conflict sampling for a single scene."""
+    _clear_caches()
 
     # Build exclusion set: (ego_id, frame) pairs near known conflicts
     exclude_set: Set[Tuple[Any, int]] = set()
@@ -707,7 +767,7 @@ def sample_non_conflicts(
             continue
 
         n_target = min(
-            int(conflict_count.get(ego_id, max(3, len(ego_frames) // 100)) * 1.8),
+            int(conflict_count.get(ego_id, max(3, len(ego_frames) // 100)) * 1),
             max_per_ego,
         )
         safe_frames = [

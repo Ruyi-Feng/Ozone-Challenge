@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,16 @@ except ImportError:
 
 from model_baseline.config import BaselineRuntimeConfig, load_config
 from model_baseline.factories import build_dataset, build_model
+
+# Neighbor slot → model target index mapping (consistent with baseline.py)
+TARGET_IDX_TO_ROLE: dict[int, str] = {
+    0: "front",
+    1: "rear",
+    2: "left_front",
+    3: "left_rear",
+    4: "right_front",
+    5: "right_rear",
+}
 
 
 def _require_torch() -> None:
@@ -90,6 +101,8 @@ def run_eval(
     # --- Accumulate predictions ---
     all_preds: list[int] = []
     all_labels: list[int] = []
+    target_preds: list[int] = []   # predicted neighbor index
+    target_labels: list[int] = []  # ground-truth neighbor index
     total_loss = 0.0
     n = 0
 
@@ -106,25 +119,68 @@ def run_eval(
         total_loss += float(loss_dict["loss"]) * bs
         n += bs
 
+        # Conflict prediction
         pred = (torch.sigmoid(outputs["conflict_logit"]) >= 0.5).long()
         all_preds.extend(pred.cpu().tolist())
         all_labels.extend(is_conflict.long().cpu().tolist())
 
+        # Target prediction (conflict samples only)
+        conf_mask = (
+            is_conflict.to(dtype=torch.bool)
+            & (target_idx >= 0).to(dtype=torch.bool)
+        )
+        if conf_mask.any():
+            t_pred = outputs["target_logits"][conf_mask].argmax(dim=-1)
+            target_preds.extend(t_pred.cpu().tolist())
+            target_labels.extend(target_idx[conf_mask].long().cpu().tolist())
+
+    # --- Conflict metrics ---
     metrics = _compute_metrics(np.array(all_preds), np.array(all_labels))
     metrics["loss"] = total_loss / max(n, 1)
+
+    # --- Target metrics ---
+    target_acc = 0.0
+    per_role: dict[str, dict[str, int]] = defaultdict(lambda: {"correct": 0, "total": 0})
+    if target_labels:
+        t_preds_arr = np.array(target_preds)
+        t_labels_arr = np.array(target_labels)
+        target_acc = float((t_preds_arr == t_labels_arr).mean())
+
+        for pred, label in zip(target_preds, target_labels):
+            role = TARGET_IDX_TO_ROLE.get(label, f"unknown({label})")
+            per_role[role]["total"] += 1
+            if pred == label:
+                per_role[role]["correct"] += 1
+
+    metrics["target_acc"] = target_acc
+    metrics["target_samples"] = len(target_labels)
 
     # --- Report ---
     print(f"\n{'='*50}")
     print("Evaluation Results")
     print(f"{'='*50}")
-    print(f"  Samples:    {n}")
-    print(f"  Loss:       {metrics['loss']:.4f}")
-    print(f"  Accuracy:   {metrics['accuracy']:.4f}")
-    print(f"  Precision:  {metrics['precision']:.4f}")
-    print(f"  Recall:     {metrics['recall']:.4f}")
-    print(f"  F1:         {metrics['f1']:.4f}")
+    print(f"  Samples:         {n}")
+    print(f"  Loss:            {metrics['loss']:.4f}")
+    print()
+    print("Conflict Prediction:")
+    print(f"  Accuracy:        {metrics['accuracy']:.4f}")
+    print(f"  Precision:       {metrics['precision']:.4f}")
+    print(f"  Recall:          {metrics['recall']:.4f}")
+    print(f"  F1:              {metrics['f1']:.4f}")
     print(f"  TP={metrics['tp']}  TN={metrics['tn']}  "
           f"FP={metrics['fp']}  FN={metrics['fn']}")
+    print()
+    print("Target Prediction (conflict partner identification):")
+    print(f"  Samples:         {metrics['target_samples']}")
+    print(f"  Accuracy:        {metrics['target_acc']:.4f}")
+    if per_role:
+        print("  Per-role:")
+        for role in ["front", "rear", "left_front", "left_rear",
+                     "right_front", "right_rear"]:
+            if role in per_role:
+                r = per_role[role]
+                acc = r["correct"] / max(r["total"], 1)
+                print(f"    {role:>12s}: {acc:.3f} ({r['correct']}/{r['total']})")
 
     return metrics
 

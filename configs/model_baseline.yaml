@@ -6,12 +6,12 @@ model:
   num_agents: 7           # ego + 6 neighbor slots
   num_features: 4         # e.g. dx, dy, heading_rel, speed
   hidden_dim: 64
-  # num_frames: inferred from fps * history_sec, or set explicitly
+  num_frames: 80            # 10 fps × 8 s history
 
 data:
-  data_train: data/processed/data/events_data_train.csv
+  data_train: data/processed/train
   label_train: data/processed/labels/events_labels_train.csv
-  data_val: data/processed/data/events_data_val.csv
+  data_val: data/processed/val
   label_val: data/processed/labels/events_labels_val.csv
   # future traj is optional for this classification baseline
   # future_train: data/processed/labels/events_future_traj_train.csv

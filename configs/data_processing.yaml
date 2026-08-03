@@ -1,7 +1,7 @@
 time:
   history_sec: 8.0
   future_sec: 3.0
-  fps: 25.0  # 10 Hz for NGSIM native data; use 25.0 for upsampled NBDT data
+  fps: 10.0  # unified 10 Hz for all datasets (inD, CitySim, NGSIM)
   conflict_ttc_threshold: 1.5
 
 neighbor:
@@ -15,7 +15,7 @@ neighbor:
     - right_rear
 
 io:
-  raw_dir: data/raw
+  raw_dir: data/raw_subset
   interim_dir: data/interim/candidates
   data_out: data/processed/data/events_data.csv
   label_out: data/processed/labels/events_labels.csv

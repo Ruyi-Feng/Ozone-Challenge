@@ -317,8 +317,8 @@ def _precompute_frame_neighbors(
     """Pre-compute per-frame neighbor-slot assignments for ALL vehicles.
 
     Uses numpy broadcasting to compute pairwise geometry once per frame,
-    then builds a lookup table.  Stage 3 can then answer “which vehicles
-    are in ego's neighbor slots at frame *f*” in O(1) without recomputing
+    then builds a lookup table.  Stage 3 can then answer "which vehicles
+    are in ego's neighbor slots at frame *f*" in O(1) without recomputing
     distances / headings / slot classification.
     """
     from tqdm import tqdm
@@ -327,70 +327,73 @@ def _precompute_frame_neighbors(
     lat_thresh = DEFAULT_LATERAL_THRESHOLD_M
     slots_cfg = cfg.neighbor_slots
 
-    for fnum, frame_df in tqdm(
-        frame_index.items(), desc="  precomputing frame neighbors", unit="frm"
+    # Flatten scene × frame into a single iterable so the progress bar
+    # shows the true number of scene-frame units (not just unique frameNum,
+    # which undercounts multi-scene datasets by N_scenes×).
+    scene_frames: list[tuple[str, int, pd.DataFrame]] = []
+    for fnum, frame_df in frame_index.items():
+        if len(frame_df) < 2:
+            continue
+        if "scene_id" in frame_df.columns:
+            for scene, scene_df in frame_df.groupby("scene_id"):
+                scene_frames.append((str(scene), int(fnum), scene_df))
+        else:
+            scene_frames.append(("scene", int(fnum), frame_df))
+
+    for scene, fnum, scene_df in tqdm(
+        scene_frames,
+        desc="  precomputing frame neighbors",
+        unit="frm",
     ):
-        n = len(frame_df)
-        if n < 2:
+        scene_key = (str(scene), int(fnum))
+
+        # Guard against rare duplicate carId-in-frame rows (NGSIM data
+        # occasionally has multiple rows for the same vehicle in one frame).
+        scene_df = scene_df.drop_duplicates(subset="carId", keep="first")
+
+        n_s = len(scene_df)
+        if n_s < 2:
+            cache[scene_key] = {}
             continue
 
-        # Multi-scene datasets: process each scene separately so that
-        # vehicles from different scenes are never considered together.
-        if "scene_id" in frame_df.columns:
-            scene_iter = frame_df.groupby("scene_id")
-        else:
-            scene_iter = [("scene", frame_df)]
+        x = scene_df["carCenterXm"].to_numpy(dtype=np.float64)
+        y = scene_df["carCenterYm"].to_numpy(dtype=np.float64)
+        headings = scene_df["heading"].to_numpy(dtype=np.float64)
+        car_ids = scene_df["carId"].values
 
-        for scene, scene_df in scene_iter:
-            scene_key = (str(scene), int(fnum))
+        # --- pairwise geometry (same pattern as _find_front_pairs) ---
+        dx = x[np.newaxis, :] - x[:, np.newaxis]   # [i,j] = x_j - x_i
+        dy = y[np.newaxis, :] - y[:, np.newaxis]
+        dist = np.hypot(dx, dy)
 
-            # Guard against rare duplicate carId-in-frame rows (NGSIM data
-            # occasionally has multiple rows for the same vehicle in one frame).
-            scene_df = scene_df.drop_duplicates(subset="carId", keep="first")
+        valid = (dist > 0.0) & (dist <= cfg.max_distance_m)
+        if not np.any(valid):
+            cache[scene_key] = {}
+            continue
 
-            n_s = len(scene_df)
-            if n_s < 2:
-                cache[scene_key] = {}
+        theta = np.radians(headings)
+        cos_t = np.cos(theta)
+        sin_t = np.sin(theta)
+        long_mat = dx * cos_t[:, np.newaxis] + dy * sin_t[:, np.newaxis]
+        lat_mat = -dx * sin_t[:, np.newaxis] + dy * cos_t[:, np.newaxis]
+
+        # --- classify every valid pair into a neighbor slot ---
+        ego_idx, tgt_idx = np.where(valid)
+        frame_map: Dict[Any, List[Tuple[Any, str, float]]] = {}
+
+        for i, j in zip(ego_idx, tgt_idx):
+            slot = classify_neighbor_slot(
+                float(long_mat[i, j]), float(lat_mat[i, j]),
+                lateral_threshold=lat_thresh, slots=slots_cfg,
+            )
+            if slot is None:
                 continue
+            ego_id = car_ids[i]
+            nbr_id = car_ids[j]
+            d = float(dist[i, j])
+            frame_map.setdefault(ego_id, []).append((nbr_id, slot, d))
 
-            x = scene_df["carCenterXm"].to_numpy(dtype=np.float64)
-            y = scene_df["carCenterYm"].to_numpy(dtype=np.float64)
-            headings = scene_df["heading"].to_numpy(dtype=np.float64)
-            car_ids = scene_df["carId"].values
-
-            # --- pairwise geometry (same pattern as _find_front_pairs) ---
-            dx = x[np.newaxis, :] - x[:, np.newaxis]   # [i,j] = x_j - x_i
-            dy = y[np.newaxis, :] - y[:, np.newaxis]
-            dist = np.hypot(dx, dy)
-
-            valid = (dist > 0.0) & (dist <= cfg.max_distance_m)
-            if not np.any(valid):
-                cache[scene_key] = {}
-                continue
-
-            theta = np.radians(headings)
-            cos_t = np.cos(theta)
-            sin_t = np.sin(theta)
-            long_mat = dx * cos_t[:, np.newaxis] + dy * sin_t[:, np.newaxis]
-            lat_mat = -dx * sin_t[:, np.newaxis] + dy * cos_t[:, np.newaxis]
-
-            # --- classify every valid pair into a neighbor slot ---
-            ego_idx, tgt_idx = np.where(valid)
-            frame_map: Dict[Any, List[Tuple[Any, str, float]]] = {}
-
-            for i, j in zip(ego_idx, tgt_idx):
-                slot = classify_neighbor_slot(
-                    float(long_mat[i, j]), float(lat_mat[i, j]),
-                    lateral_threshold=lat_thresh, slots=slots_cfg,
-                )
-                if slot is None:
-                    continue
-                ego_id = car_ids[i]
-                nbr_id = car_ids[j]
-                d = float(dist[i, j])
-                frame_map.setdefault(ego_id, []).append((nbr_id, slot, d))
-
-            cache[scene_key] = frame_map
+        cache[scene_key] = frame_map
 
     return cache
 
@@ -518,11 +521,15 @@ def extract_neighbors_for_events(
     *,
     frame_index: dict | None = None,
     car_index: dict | None = None,
+    neighbor_cache: dict | None = None,
 ) -> List[TrackedNeighborhoodEvent]:
     """Run neighbor extraction for all windowed events.
 
     Pre-computes a global frame-neighbor cache so that the per-event loop
     only does O(1) dict lookups instead of recomputing pairwise geometry.
+
+    Pass *neighbor_cache* to reuse a previously computed cache across
+    multiple calls (e.g. chunked processing).
     """
     from tqdm import tqdm
 
@@ -536,8 +543,9 @@ def extract_neighbors_for_events(
             ))
         return results
 
-    # --- Pre-compute once, reuse for every event ---
-    neighbor_cache = _precompute_frame_neighbors(frame_index, cfg)
+    # --- Pre-compute once (or reuse), then process every event ---
+    if neighbor_cache is None:
+        neighbor_cache = _precompute_frame_neighbors(frame_index, cfg)
 
     results: List[TrackedNeighborhoodEvent] = []
     for w in tqdm(windows, desc="  extracting neighbors", unit="evt"):

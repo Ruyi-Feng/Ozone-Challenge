@@ -132,12 +132,14 @@ def validate(
     loader: Any,
     device: torch.device,
 ) -> dict[str, float]:
-    """Validation pass — losses + conflict accuracy."""
+    """Validation pass — losses + conflict accuracy + target accuracy."""
     model.eval()
     total_loss = 0.0
     total_conflict = 0.0
     total_target = 0.0
     correct_conflict = 0
+    correct_target = 0
+    n_conflict = 0  # samples where is_conflict == 1 AND target in neighbor slots
     n = 0
 
     for batch in loader:
@@ -159,11 +161,25 @@ def validate(
         correct_conflict += int((pred == is_conflict.long()).sum())
         n += bs
 
+        # Target accuracy: only for conflict samples whose target is in
+        # a neighbour slot (target_idx >= 0), same mask as compute_loss
+        conf_mask = (
+            is_conflict.to(dtype=torch.bool)
+            & (target_idx >= 0).to(dtype=torch.bool)
+        )
+        if conf_mask.any():
+            target_pred = outputs["target_logits"][conf_mask].argmax(dim=-1)
+            correct_target += int(
+                (target_pred == target_idx[conf_mask].long()).sum()
+            )
+            n_conflict += int(conf_mask.sum().item())
+
     return {
         "loss": total_loss / max(n, 1),
         "conflict_loss": total_conflict / max(n, 1),
         "target_loss": total_target / max(n, 1),
         "conflict_acc": correct_conflict / max(n, 1),
+        "target_acc": correct_target / max(n_conflict, 1),
     }
 
 
@@ -207,7 +223,8 @@ def run_train(cfg: BaselineRuntimeConfig) -> None:
             f"(c={train_metrics['conflict_loss']:.4f} "
             f"t={train_metrics['target_loss']:.4f}) | "
             f"val loss={val_metrics['loss']:.4f} "
-            f"c_acc={val_metrics['conflict_acc']:.4f}"
+            f"c_acc={val_metrics['conflict_acc']:.4f} "
+            f"t_acc={val_metrics['target_acc']:.4f}"
         )
 
         # Save best
