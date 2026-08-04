@@ -190,6 +190,10 @@ def main(
     checkpoint: str | None = None,
 ) -> None:
     cfg = load_config(config_path)
+    if checkpoint is None:
+        default_ckpt = Path("checkpoints/best_model.pt")
+        if default_ckpt.exists():
+            checkpoint = str(default_ckpt)
     run_eval(cfg, checkpoint=checkpoint)
 
 

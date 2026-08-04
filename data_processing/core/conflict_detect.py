@@ -709,10 +709,11 @@ def sample_non_conflicts(
 
     Strategy
     --------
-    For each ego vehicle, randomly sample *t0* points in safe intervals
-    (where no conflict is active for that ego).  We sample roughly the same
-    number of non-conflict candidates as there are conflict candidates for
-    the same ego, clamped by a per-ego cap.
+    Per scene, sample non-conflict frames to match the number of conflict
+    candidates × *cfg.rebalance_target_ratio*.  When a scene does not have
+    enough safe frames to reach the target, all available safe frames are
+    sampled and the caller should downsample conflicts later to achieve
+    the desired ratio.
 
     *exclude* lists existing conflict candidates; their ego / time
     neighbourhoods are avoided.
@@ -740,10 +741,16 @@ def _sample_non_conflicts_one_scene(
     exclude: Optional[List[ConflictCandidate]] = None,
     scene_id: str = "scene",
 ) -> List[ConflictCandidate]:
-    """Core non-conflict sampling for a single scene."""
+    """Core non-conflict sampling for a single scene.
+
+    Targets ``n_conflicts × target_ratio`` non-conflict samples.  Safe frames
+    are allocated across egos proportionally to each ego's frame count.
+    When total safe frames are insufficient the function samples everything
+    available and warns — the caller is responsible for downsampling conflicts.
+    """
     _clear_caches()
 
-    # Build exclusion set: (ego_id, frame) pairs near known conflicts
+    # Build exclusion set and per-ego conflict counts
     exclude_set: Set[Tuple[Any, int]] = set()
     conflict_count: Dict[Any, int] = {}
     if exclude is not None:
@@ -757,31 +764,81 @@ def _sample_non_conflicts_one_scene(
     df = raw_df.sort_values(["frameNum", "carId"]).reset_index(drop=True)
     ego_ids = df["carId"].unique()
 
-    non_conflicts: List[ConflictCandidate] = []
-    max_per_ego = 500  # cap to avoid explosion
+    # ── per-ego: collect safe frames ────────────────────────────────────
+    ego_safe_frames: Dict[Any, List[int]] = {}
+    ego_total_frames: Dict[Any, int] = {}
+    total_safe = 0
+    total_conflicts = sum(conflict_count.values())
 
     for ego_id in ego_ids:
         ego_mask = df["carId"] == ego_id
         ego_frames = sorted(df.loc[ego_mask, "frameNum"].unique())
-        if len(ego_frames) < 2:
+        n_frames = len(ego_frames)
+        if n_frames < 2:
             continue
+        ego_total_frames[ego_id] = n_frames
+        safe = [f for f in ego_frames if (ego_id, f) not in exclude_set]
+        ego_safe_frames[ego_id] = safe
+        total_safe += len(safe)
 
-        n_target = min(
-            int(conflict_count.get(ego_id, max(3, len(ego_frames) // 100)) * 1),
-            max_per_ego,
-        )
-        safe_frames = [
-            f for f in ego_frames
-            if (ego_id, f) not in exclude_set
-        ]
-        if len(safe_frames) < n_target:
+    # ── target: match conflicts × ratio, capped by available safe frames ─
+    target_ratio = getattr(cfg, "rebalance_target_ratio", 1.0)
+    n_target = int(total_conflicts * target_ratio)
+    n_sample = min(n_target, total_safe)
+
+    if total_safe < n_target:
+        print(f"  [{scene_id}] WARNING: only {total_safe} safe frames available "
+              f"for {total_conflicts} conflicts (target {n_target}). "
+              f"Non-conflict sampling saturated — conflicts should be downsampled "
+              f"in post-processing.")
+
+    if n_sample == 0:
+        return []
+
+    # ── proportional allocation across egos ─────────────────────────────
+    import random
+    seed = getattr(cfg, "rebalance_seed", 42)
+
+    # Give each ego a share of n_sample proportional to its safe-frames count
+    allocated: Dict[Any, int] = {}
+    remaining = n_sample
+    for ego_id in ego_ids:
+        safe = ego_safe_frames.get(ego_id)
+        if not safe:
+            allocated[ego_id] = 0
             continue
+        # Round-robin: allocate proportionally, floor to available
+        share = max(1, int(n_sample * len(safe) / max(total_safe, 1)))
+        share = min(share, len(safe))
+        allocated[ego_id] = share
 
-        # Simple random sampling (fixed seed for reproducibility)
-        import random
-        rng = random.Random(hash(ego_id) & 0x7FFFFFFF)
-        sampled = rng.sample(safe_frames, n_target)
-        for fnum in sampled:
+    # Adjust to hit exactly n_sample (top-up from egos with spare capacity)
+    total_allocated = sum(allocated.values())
+    ego_order = sorted(ego_ids, key=lambda e: len(ego_safe_frames.get(e, [])), reverse=True)
+    i = 0
+    while total_allocated < n_sample and i < len(ego_order) * 2:
+        ego_id = ego_order[i % len(ego_order)]
+        safe = ego_safe_frames.get(ego_id, [])
+        if allocated.get(ego_id, 0) < len(safe):
+            allocated[ego_id] = allocated.get(ego_id, 0) + 1
+            total_allocated += 1
+        i += 1
+    while total_allocated > n_sample and i < len(ego_order) * 2:
+        ego_id = ego_order[-(i % len(ego_order)) - 1]
+        if allocated.get(ego_id, 0) > 0:
+            allocated[ego_id] = allocated[ego_id] - 1
+            total_allocated -= 1
+        i += 1
+
+    # ── sample ──────────────────────────────────────────────────────────
+    non_conflicts: List[ConflictCandidate] = []
+    for ego_id in ego_ids:
+        n = allocated.get(ego_id, 0)
+        safe = ego_safe_frames.get(ego_id, [])
+        if n <= 0 or not safe:
+            continue
+        rng = random.Random(hash(f"{ego_id}_{scene_id}_{seed}") & 0x7FFFFFFF)
+        for fnum in rng.sample(safe, min(n, len(safe))):
             non_conflicts.append(ConflictCandidate(
                 scene_id=scene_id,
                 ego_id=ego_id,
@@ -794,11 +851,68 @@ def _sample_non_conflicts_one_scene(
     return non_conflicts
 
 
+def _downsample_conflicts_per_scene(
+    conflicts: List[ConflictCandidate],
+    n_target: int,
+    seed: int = 42,
+) -> List[ConflictCandidate]:
+    """Randomly downsample conflicts to *n_target* with deterministic seed."""
+    if len(conflicts) <= n_target:
+        return conflicts
+    import random
+    rng = random.Random(seed)
+    return rng.sample(conflicts, n_target)
+
+
 def detect_all_candidates(
     raw_df: pd.DataFrame,
     cfg: ProcessingConfig,
 ) -> List[ConflictCandidate]:
-    """Run conflict detection then non-conflict sampling; return merged candidate list."""
+    """Run conflict detection then non-conflict sampling; return merged candidate list.
+
+    Per-scene rebalancing (when ``cfg.rebalance_enabled``):
+    - For each scene, conflict count is capped so that the conflict:non-conflict
+      ratio does not exceed *cfg.rebalance_target_ratio*.
+    - This means in scenes with very few safe non-conflict frames (e.g.
+      Peachtree), conflicts are downsampled to restore balance.
+    """
     conflicts = detect_conflicts(raw_df, cfg)
     non_conflicts = sample_non_conflicts(raw_df, cfg, exclude=conflicts)
-    return conflicts + non_conflicts
+
+    if not cfg.rebalance_enabled:
+        return conflicts + non_conflicts
+
+    # ── per-scene rebalance: downsample conflicts if needed ──────────────
+    target_ratio = cfg.rebalance_target_ratio
+    seed = cfg.rebalance_seed
+
+    # Group by scene_id
+    from collections import defaultdict
+    scene_conflicts: Dict[str, List[ConflictCandidate]] = defaultdict(list)
+    scene_non: Dict[str, List[ConflictCandidate]] = defaultdict(list)
+    for c in conflicts:
+        scene_conflicts[c.scene_id].append(c)
+    for n in non_conflicts:
+        scene_non[n.scene_id].append(n)
+
+    balanced_conflicts: List[ConflictCandidate] = []
+    for scene_id in sorted(set(list(scene_conflicts) + list(scene_non))):
+        n_c = len(scene_conflicts.get(scene_id, []))
+        n_n = len(scene_non.get(scene_id, []))
+        if n_n == 0:
+            balanced_conflicts.extend(scene_conflicts[scene_id])
+            continue
+        # Cap conflicts: at most n_non * target_ratio
+        max_c = max(n_n, int(n_n * target_ratio))
+        if n_c > max_c:
+            print(f"  [{scene_id}] downsampling conflicts: {n_c} → {max_c} "
+                  f"(non-conflicts: {n_n}, target ratio: {target_ratio})")
+            balanced_conflicts.extend(
+                _downsample_conflicts_per_scene(
+                    scene_conflicts[scene_id], max_c, seed=seed,
+                )
+            )
+        else:
+            balanced_conflicts.extend(scene_conflicts[scene_id])
+
+    return balanced_conflicts + non_conflicts

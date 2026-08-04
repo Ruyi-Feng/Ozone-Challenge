@@ -154,3 +154,9 @@ class ProcessingConfig:
     data_out: str = "data/processed/data/events_data.csv"
     label_out: str = "data/processed/labels/events_labels.csv"
     future_traj_out: str = "data/processed/labels/events_future_traj.csv"
+    # ── rebalance ──
+    rebalance_enabled: bool = False
+    rebalance_target_ratio: float = 1.0  # target conflict:non-conflict ratio
+    rebalance_balance_conflict_types: bool = False
+    rebalance_per_scene: bool = True
+    rebalance_seed: int = 42

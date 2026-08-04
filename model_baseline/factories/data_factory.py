@@ -8,10 +8,12 @@ from __future__ import annotations
 from typing import Any
 
 from model_baseline.datasets.baseline import BaselineConflictDataset
+from model_baseline.datasets.binary_baseline import BinaryBaselineDataset
 
 # Registry: model_name → Dataset class (or builder)
 _DATASET_REGISTRY: dict[str, type] = {
     "baseline": BaselineConflictDataset,
+    "baseline_binary": BinaryBaselineDataset,
 }
 
 

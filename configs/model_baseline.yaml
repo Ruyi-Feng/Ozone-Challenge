@@ -1,5 +1,9 @@
 # Model + data are both selected by the same `model.name` string
 # via data_factory / model_factory registries.
+#
+# Available dataset types:
+#   baseline        — memmap .npy tensor cache (default)
+#   baseline_binary — flat binary file + index CSV, f.seek() on-demand
 
 model:
   name: baseline          # registry key → dataset form + network
@@ -9,7 +13,7 @@ model:
   num_frames: 80            # 10 fps × 8 s history
 
 data:
-  data_train: data/processed/train
+  data_train: data/processed/train       # prefix for {train}_x.npy or {train}_data.bin
   label_train: data/processed/labels/events_labels_train.csv
   data_val: data/processed/val
   label_val: data/processed/labels/events_labels_val.csv
