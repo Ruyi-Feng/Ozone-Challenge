@@ -24,8 +24,18 @@ def _ego_frames(
     raw_df: pd.DataFrame,
     scene_id: str,
     ego_id,
+    *,
+    car_index: dict | None = None,
 ) -> pd.DataFrame:
     """Return ego's trajectory rows sorted by frameNum."""
+    if car_index is not None:
+        car_df = car_index.get(ego_id)
+        if car_df is None or car_df.empty:
+            return pd.DataFrame()
+        if "scene_id" in car_df.columns:
+            car_df = car_df[car_df["scene_id"] == scene_id]
+        return car_df.sort_values("frameNum")
+
     mask = (raw_df["scene_id"] == scene_id) if "scene_id" in raw_df.columns else pd.Series(True, index=raw_df.index)
     ego_df = raw_df[mask & (raw_df["carId"] == ego_id)].sort_values("frameNum")
     return ego_df
@@ -89,6 +99,7 @@ def validate_history_length(
     t0: float,
     history_sec: float,
     fps: float = 25.0,
+    car_index: dict | None = None,
 ) -> bool:
     """Return True if ego history in [t0 - history_frames, t0] is sufficiently covered.
 
@@ -97,7 +108,7 @@ def validate_history_length(
     history_frames = _sec2frames(history_sec, fps)
     t_start = t0 - history_frames
 
-    ego_df = _ego_frames(raw_df, scene_id, ego_id)
+    ego_df = _ego_frames(raw_df, scene_id, ego_id, car_index=car_index)
     if ego_df.empty:
         return False
 
@@ -121,6 +132,7 @@ def validate_future_interval(
     t_conflict: Optional[float],
     is_conflict: bool,
     fps: float = 25.0,
+    car_index: dict | None = None,
 ) -> bool:
     """Validate future window (t0, t0 + future_frames].
 
@@ -130,7 +142,7 @@ def validate_future_interval(
     future_frames = _sec2frames(future_sec, fps)
     t_end = t0 + future_frames
 
-    ego_df = _ego_frames(raw_df, scene_id, ego_id)
+    ego_df = _ego_frames(raw_df, scene_id, ego_id, car_index=car_index)
     if ego_df.empty:
         return False
 
@@ -151,6 +163,8 @@ def build_windowed_candidate(
     raw_df: pd.DataFrame,
     candidate: ConflictCandidate,
     cfg: ProcessingConfig,
+    *,
+    car_index: dict | None = None,
 ) -> Optional[WindowedEventCandidate]:
     """Build one WindowedEventCandidate if t0 proposal and checks pass; else None."""
     # Propose t0
@@ -172,6 +186,7 @@ def build_windowed_candidate(
         t0=t0,
         history_sec=cfg.history_sec,
         fps=cfg.fps,
+        car_index=car_index,
     )
 
     # Validate future
@@ -184,6 +199,7 @@ def build_windowed_candidate(
         t_conflict=candidate.t_conflict,
         is_conflict=candidate.is_conflict,
         fps=cfg.fps,
+        car_index=car_index,
     )
 
     return WindowedEventCandidate(
@@ -203,11 +219,15 @@ def build_windowed_events(
     raw_df: pd.DataFrame,
     candidates: List[ConflictCandidate],
     cfg: ProcessingConfig,
+    *,
+    car_index: dict | None = None,
 ) -> List[WindowedEventCandidate]:
     """Validate all candidates and keep only those with valid 8s + 3s windows."""
+    from tqdm import tqdm
+
     windowed: List[WindowedEventCandidate] = []
-    for cand in candidates:
-        built = build_windowed_candidate(raw_df, cand, cfg)
+    for cand in tqdm(candidates, desc="  validating windows", unit="cand"):
+        built = build_windowed_candidate(raw_df, cand, cfg, car_index=car_index)
         if built is not None and built.history_ok and built.future_ok:
             windowed.append(built)
     return windowed

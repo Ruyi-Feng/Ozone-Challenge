@@ -1,54 +1,100 @@
-"""Baseline dataset form — multi-agent history → conflict labels.
+"""Baseline dataset — multi-agent history → conflict labels.
 
-TODO: implement CSV join / tensor packing. Left empty by design for now.
+Loads pre-computed tensor cache (memmap .npy files) for instant random access.
+
+Sample contract (consumed by BaselineConflictModel):
+  __getitem__ → dict with:
+    - "x":           FloatTensor [A, T, F]  multi-agent history
+    - "agent_mask":  BoolTensor  [A]        True if slot has a vehicle
+    - "is_conflict": FloatTensor  scalar    0.0 / 1.0
+    - "target_idx":  LongTensor   scalar    neighbor slot index in {0..5}, or -1
+    - "event_id":    int                     for debugging
+
+Agent axis A is ordered as:
+  [ego, front, rear, left_front, left_rear, right_front, right_rear]
+Features F: [dx, dy, heading_rel, speed]  relative to ego @ t₀.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
 
-class BaselineConflictDataset:
-    """
-    Expected sample contract (for matching BaselineConflictModel):
+try:
+    import torch
+    from torch.utils.data import Dataset
+except ImportError:
+    torch = None  # type: ignore
+    Dataset = object  # type: ignore
 
-    Variable neighbor count is handled by **fixed-A padding + agent_mask**:
-      - Always emit A = 7 slots (ego + 6 azimuth roles).
-      - Missing neighbors: zero-fill that slot's track, set agent_mask[a] = False.
-      - Model mean-pools / softmax only over True slots.
 
-    __getitem__ → dict with:
-      - "x":           FloatTensor [A, T, F]  multi-agent history
-      - "agent_mask":  BoolTensor  [A]        True if slot has a vehicle
-      - "is_conflict": Float/Long scalar     0/1
-      - "target_idx":  Long scalar           neighbor slot index in {0..A-2}
-                                              (maps to roles[1:]); -1 if none
-      - "event_id":    str / int             for debugging
+class BaselineConflictDataset(Dataset):
+    """PyTorch Dataset backed by memory-mapped tensor cache.
 
-    Agent axis A is ordered as:
-      [ego, front, rear, left_front, left_rear, right_front, right_rear]
-    Features F (suggested): [dx, dy, heading_rel, speed] relative to ego@t0.
+    Each sample is one event: 8 s of history for ego + up to 6 neighbours,
+    represented as a fixed-size [A=7, T, F=4] tensor with an agent_mask.
+
+    Parameters
+    ----------
+    data_path : str
+        Path prefix for ``{prefix}_x.npy``, ``{prefix}_mask.npy``, etc.
+    label_path : str
+        Unused (labels are embedded in the ``_y.npy`` cache).
+        Kept for factory compatibility.
+    split : str
+        Logical split tag (printed in logs).
     """
 
     def __init__(
         self,
         data_path: str,
-        label_path: str,
+        label_path: str = "",
         split: str = "train",
         future_path: Optional[str] = None,
+        num_agents: int = 7,
+        num_features: int = 4,
+        num_frames: Optional[int] = None,
+        fps: float = 10.0,
+        history_sec: float = 8.0,
         **kwargs: Any,
     ) -> None:
-        self.data_path = data_path
-        self.label_path = label_path
+        if torch is None:
+            raise ImportError("PyTorch is required for BaselineConflictDataset.")
+
         self.split = split
-        self.future_path = future_path
-        # TODO: load CSVs, group by Event_id, build index
-        raise NotImplementedError("BaselineConflictDataset not implemented yet")
+        self.num_agents = num_agents
+        self.num_features = num_features
+        self.num_frames = num_frames or int(round(fps * history_sec))
+
+        # ── memory-map the pre-computed tensor cache ──────────────────────
+        prefix = data_path  # e.g. "data/processed/train"
+        self._x = np.load(f"{prefix}_x.npy", mmap_mode="r")
+        self._mask = np.load(f"{prefix}_mask.npy", mmap_mode="r")
+        self._y = np.load(f"{prefix}_y.npy", mmap_mode="r")
+        self._target = np.load(f"{prefix}_target.npy", mmap_mode="r")
+        self._event_ids = np.load(f"{prefix}_eid.npy", mmap_mode="r")
+
+        # Build event_id → index for debugging
+        self._eid_to_idx = {int(eid): i for i, eid in enumerate(self._event_ids)}
+
+    # ------------------------------------------------------------------
+    # Length
+    # ------------------------------------------------------------------
 
     def __len__(self) -> int:
-        # TODO
-        raise NotImplementedError
+        return len(self._x)
+
+    # ------------------------------------------------------------------
+    # Get-item
+    # ------------------------------------------------------------------
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        # TODO: return tensors matching the contract above
-        raise NotImplementedError
+        return {
+            "x": torch.from_numpy(self._x[index].copy()),
+            "agent_mask": torch.from_numpy(self._mask[index].copy()),
+            "is_conflict": torch.tensor(float(self._y[index]), dtype=torch.float32),
+            "target_idx": torch.tensor(int(self._target[index]), dtype=torch.long),
+            "event_id": int(self._event_ids[index]),
+        }

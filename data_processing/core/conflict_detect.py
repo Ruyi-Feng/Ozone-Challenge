@@ -13,14 +13,10 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import numpy as np
 import pandas as pd
 
 from data_processing.io.schema import ConflictCandidate, ProcessingConfig
-from data_processing.utils.geometry import (
-    classify_neighbor_slot,
-    compute_distance,
-    compute_relative_pose,
-)
 
 # ---------------------------------------------------------------------------
 # Per-frame caches (cleared per detect_conflicts / sample_non_conflicts call)
@@ -472,33 +468,69 @@ def _find_front_pairs(
 ) -> List[Tuple[Any, Any]]:
     """For one frame, return (ego_id, target_id) pairs where target is ahead of ego.
 
+    When *frame_df* contains vehicles from multiple scenes (multi-file merge),
+    pairs are formed within each scene independently to avoid cross-scene
+    contamination.
+
+    Vectorised with numpy broadcasting — O(N²) in C, not Python.
     A pair is formed when *target* falls into one of the front slots
     (front / left_front / right_front) relative to *ego* and is within
     *max_distance_m*.
     """
-    pairs: List[Tuple[Any, Any]] = []
-    rows = frame_df.to_dict("records")
-    n = len(rows)
-    for i in range(n):
-        ego = rows[i]
-        for j in range(n):
-            if i == j:
-                continue
-            target = rows[j]
-            dist = compute_distance(
-                ego["carCenterXm"], ego["carCenterYm"],
-                target["carCenterXm"], target["carCenterYm"],
-            )
-            if dist > cfg.max_distance_m:
-                continue
-            dx, dy = compute_relative_pose(
-                ego["carCenterXm"], ego["carCenterYm"], ego["heading"],
-                target["carCenterXm"], target["carCenterYm"],
-            )
-            slot = classify_neighbor_slot(dx, dy, slots=cfg.neighbor_slots)
-            if slot in _FRONT_SLOTS:
-                pairs.append((ego["carId"], target["carId"]))
-    return pairs
+    if "scene_id" in frame_df.columns:
+        pairs: List[Tuple[Any, Any]] = []
+        for _, scene_df in frame_df.groupby("scene_id"):
+            pairs.extend(_find_front_pairs_single(scene_df, cfg))
+        return pairs
+    return _find_front_pairs_single(frame_df, cfg)
+
+
+def _find_front_pairs_single(
+    frame_df: pd.DataFrame,
+    cfg: ProcessingConfig,
+) -> List[Tuple[Any, Any]]:
+    """Vectorised pair building for a single scene (no cross-scene pairs)."""
+    n = len(frame_df)
+    if n < 2:
+        return []
+
+    # --- extract columns as numpy arrays ---
+    x = frame_df["carCenterXm"].to_numpy(dtype=np.float64)
+    y = frame_df["carCenterYm"].to_numpy(dtype=np.float64)
+    heading = frame_df["heading"].to_numpy(dtype=np.float64)
+    car_ids = frame_df["carId"].values
+
+    # --- pairwise dx, dy: dx[i, j] = x_j - x_i ---
+    dx = x[np.newaxis, :] - x[:, np.newaxis]
+    dy = y[np.newaxis, :] - y[:, np.newaxis]
+
+    # --- distance matrix ---
+    dist = np.hypot(dx, dy)
+
+    # --- mask: i != j, within max_distance ---
+    valid = (dist > 0.0) & (dist <= cfg.max_distance_m)
+    if not np.any(valid):
+        return []
+
+    # --- rotate (dx, dy) into each ego's local frame ---
+    theta = np.radians(heading)
+    cos_t = np.cos(theta)
+    sin_t = np.sin(theta)
+
+    # longitudinal[i,j]: how far ahead target j is from ego i
+    long_mat = dx * cos_t[:, np.newaxis] + dy * sin_t[:, np.newaxis]
+
+    # "front slot" ⇔ target is ahead of ego (longitudinal ≥ 0).
+    # All three front variants (front / left_front / right_front) share this
+    # condition; the lateral split only matters for slot naming in Stage 3.
+    valid &= long_mat >= 0.0
+
+    if not np.any(valid):
+        return []
+
+    # --- extract (ego_idx, tgt_idx) pairs ---
+    ego_idx, tgt_idx = np.where(valid)
+    return [(car_ids[i], car_ids[j]) for i, j in zip(ego_idx, tgt_idx)]
 
 
 # ---------------------------------------------------------------------------
@@ -559,8 +591,12 @@ def detect_conflicts(
 ) -> List[ConflictCandidate]:
     """Detect conflict events from standardized trajectories.
 
-    Workflow
-    --------
+    When *raw_df* spans multiple scenes (``scene_id`` column present),
+    each scene is processed independently to avoid cross-scene vehicle
+    pairing.  Caches (velocity / acceleration) are cleared between scenes.
+
+    Workflow (per scene)
+    --------------------
     1. Group raw data by *frameNum*.
     2. Per frame, build (ego, target) pairs where target is in a front slot.
     3. For each pair, compute 2D_TTC using OBB geometry (NBDT standard).
@@ -571,37 +607,68 @@ def detect_conflicts(
     -------
     List[ConflictCandidate] with ``is_conflict=True``.
     """
-    _clear_caches()
-    dt = 1.0 / cfg.fps
-
     if not _has_obb_data(raw_df):
         raise ValueError(
             "OBB corner columns (boundingBox1Xm..4Ym) missing from raw data. "
             "2D_TTC requires OBB geometry."
         )
 
-    # Derive scene_id from dataframe if present, else use fallback
-    scene_id: str = "scene"
     if "scene_id" in raw_df.columns:
-        vals = raw_df["scene_id"].unique()
-        scene_id = str(vals[0]) if len(vals) > 0 else "scene"
+        all_candidates: List[ConflictCandidate] = []
+        scene_names = sorted(raw_df["scene_id"].unique())
+        for scene_id in scene_names:
+            _clear_caches()
+            scene_df = raw_df[raw_df["scene_id"] == scene_id]
+            candidates = _detect_conflicts_one_scene(
+                scene_df, cfg, scene_id=str(scene_id),
+            )
+            all_candidates.extend(candidates)
+        return all_candidates
+
+    return _detect_conflicts_one_scene(raw_df, cfg, "scene")
+
+
+def _detect_conflicts_one_scene(
+    raw_df: pd.DataFrame,
+    cfg: ProcessingConfig,
+    scene_id: str,
+) -> List[ConflictCandidate]:
+    """Core detection logic for a single scene.  See ``detect_conflicts``."""
+    _clear_caches()
+    dt = 1.0 / cfg.fps
 
     # Sort by frame — critical for cache correctness (per-frame sequential)
     df = raw_df.sort_values(["frameNum", "carId"]).reset_index(drop=True)
     frames = df.groupby("frameNum")
 
+    from tqdm import tqdm
+
     # Per-pair 2D_TTC time series:  (ego, target) → [(frameNum, 2D_TTC), ...]
     pair_series: Dict[Tuple[Any, Any], List[Tuple[int, Optional[float]]]] = {}
 
-    for frame_num, frame_df in frames:
+    n_frames_total = len(frames)
+    print(f"  Stage 1/4: conflict detection — {n_frames_total} frames, "
+          f"fps={cfg.fps}, TTC<{cfg.conflict_ttc_threshold}s"
+          f"{' (scene ' + scene_id + ')' if scene_id != 'scene' else ''}")
+
+    for frame_num, frame_df in tqdm(
+        frames, total=n_frames_total, desc="  scanning frames", unit="frm"
+    ):
         front_pairs = _find_front_pairs(frame_df, cfg)
+
+        # Build O(1) carId → positional-index lookup once per frame
+        # (avoids repeated boolean-mask scans in the hot pair loop below).
+        car_ids = frame_df["carId"].values
+        car_pos: dict = {cid: i for i, cid in enumerate(car_ids)}
+
         for ego_id, tgt_id in front_pairs:
             key = (ego_id, tgt_id)
-            try:
-                ego_row = frame_df.loc[frame_df["carId"] == ego_id].iloc[0]
-                tgt_row = frame_df.loc[frame_df["carId"] == tgt_id].iloc[0]
-            except IndexError:
+            ego_pos = car_pos.get(ego_id)
+            tgt_pos = car_pos.get(tgt_id)
+            if ego_pos is None or tgt_pos is None:
                 continue
+            ego_row = frame_df.iloc[ego_pos]
+            tgt_row = frame_df.iloc[tgt_pos]
             ttc = _compute_2d_ttc(ego_row, tgt_row, dt)
             pair_series.setdefault(key, []).append((int(frame_num), ttc))
 
@@ -637,23 +704,53 @@ def sample_non_conflicts(
 ) -> List[ConflictCandidate]:
     """Sample non-conflict candidates under the same windowing assumptions.
 
+    When *raw_df* spans multiple scenes each scene is sampled independently
+    so that ego_ids from different scenes do not leak.
+
     Strategy
     --------
-    For each ego vehicle, randomly sample *t0* points in safe intervals
-    (where no conflict is active for that ego).  We sample roughly the same
-    number of non-conflict candidates as there are conflict candidates for
-    the same ego, clamped by a per-ego cap.
+    Per scene, sample non-conflict frames to match the number of conflict
+    candidates × *cfg.rebalance_target_ratio*.  When a scene does not have
+    enough safe frames to reach the target, all available safe frames are
+    sampled and the caller should downsample conflicts later to achieve
+    the desired ratio.
 
     *exclude* lists existing conflict candidates; their ego / time
     neighbourhoods are avoided.
     """
-    _clear_caches()
-    scene_id: str = "scene"
     if "scene_id" in raw_df.columns:
-        vals = raw_df["scene_id"].unique()
-        scene_id = str(vals[0]) if len(vals) > 0 else "scene"
+        all_non: List[ConflictCandidate] = []
+        for scene_id in sorted(raw_df["scene_id"].unique()):
+            scene_df = raw_df[raw_df["scene_id"] == scene_id]
+            scene_exclude = (
+                [c for c in exclude if c.scene_id == scene_id]
+                if exclude else None
+            )
+            all_non.extend(_sample_non_conflicts_one_scene(
+                scene_df, cfg, exclude=scene_exclude, scene_id=str(scene_id),
+            ))
+        return all_non
 
-    # Build exclusion set: (ego_id, frame) pairs near known conflicts
+    return _sample_non_conflicts_one_scene(raw_df, cfg, exclude=exclude, scene_id="scene")
+
+
+def _sample_non_conflicts_one_scene(
+    raw_df: pd.DataFrame,
+    cfg: ProcessingConfig,
+    *,
+    exclude: Optional[List[ConflictCandidate]] = None,
+    scene_id: str = "scene",
+) -> List[ConflictCandidate]:
+    """Core non-conflict sampling for a single scene.
+
+    Targets ``n_conflicts × target_ratio`` non-conflict samples.  Safe frames
+    are allocated across egos proportionally to each ego's frame count.
+    When total safe frames are insufficient the function samples everything
+    available and warns — the caller is responsible for downsampling conflicts.
+    """
+    _clear_caches()
+
+    # Build exclusion set and per-ego conflict counts
     exclude_set: Set[Tuple[Any, int]] = set()
     conflict_count: Dict[Any, int] = {}
     if exclude is not None:
@@ -667,31 +764,81 @@ def sample_non_conflicts(
     df = raw_df.sort_values(["frameNum", "carId"]).reset_index(drop=True)
     ego_ids = df["carId"].unique()
 
-    non_conflicts: List[ConflictCandidate] = []
-    max_per_ego = 20  # cap to avoid explosion
+    # ── per-ego: collect safe frames ────────────────────────────────────
+    ego_safe_frames: Dict[Any, List[int]] = {}
+    ego_total_frames: Dict[Any, int] = {}
+    total_safe = 0
+    total_conflicts = sum(conflict_count.values())
 
     for ego_id in ego_ids:
         ego_mask = df["carId"] == ego_id
         ego_frames = sorted(df.loc[ego_mask, "frameNum"].unique())
-        if len(ego_frames) < 2:
+        n_frames = len(ego_frames)
+        if n_frames < 2:
             continue
+        ego_total_frames[ego_id] = n_frames
+        safe = [f for f in ego_frames if (ego_id, f) not in exclude_set]
+        ego_safe_frames[ego_id] = safe
+        total_safe += len(safe)
 
-        n_target = min(
-            conflict_count.get(ego_id, max(3, len(ego_frames) // 100)),
-            max_per_ego,
-        )
-        safe_frames = [
-            f for f in ego_frames
-            if (ego_id, f) not in exclude_set
-        ]
-        if len(safe_frames) < n_target:
+    # ── target: match conflicts × ratio, capped by available safe frames ─
+    target_ratio = getattr(cfg, "rebalance_target_ratio", 1.0)
+    n_target = int(total_conflicts * target_ratio)
+    n_sample = min(n_target, total_safe)
+
+    if total_safe < n_target:
+        print(f"  [{scene_id}] WARNING: only {total_safe} safe frames available "
+              f"for {total_conflicts} conflicts (target {n_target}). "
+              f"Non-conflict sampling saturated — conflicts should be downsampled "
+              f"in post-processing.")
+
+    if n_sample == 0:
+        return []
+
+    # ── proportional allocation across egos ─────────────────────────────
+    import random
+    seed = getattr(cfg, "rebalance_seed", 42)
+
+    # Give each ego a share of n_sample proportional to its safe-frames count
+    allocated: Dict[Any, int] = {}
+    remaining = n_sample
+    for ego_id in ego_ids:
+        safe = ego_safe_frames.get(ego_id)
+        if not safe:
+            allocated[ego_id] = 0
             continue
+        # Round-robin: allocate proportionally, floor to available
+        share = max(1, int(n_sample * len(safe) / max(total_safe, 1)))
+        share = min(share, len(safe))
+        allocated[ego_id] = share
 
-        # Simple random sampling (fixed seed for reproducibility)
-        import random
-        rng = random.Random(hash(ego_id) & 0x7FFFFFFF)
-        sampled = rng.sample(safe_frames, n_target)
-        for fnum in sampled:
+    # Adjust to hit exactly n_sample (top-up from egos with spare capacity)
+    total_allocated = sum(allocated.values())
+    ego_order = sorted(ego_ids, key=lambda e: len(ego_safe_frames.get(e, [])), reverse=True)
+    i = 0
+    while total_allocated < n_sample and i < len(ego_order) * 2:
+        ego_id = ego_order[i % len(ego_order)]
+        safe = ego_safe_frames.get(ego_id, [])
+        if allocated.get(ego_id, 0) < len(safe):
+            allocated[ego_id] = allocated.get(ego_id, 0) + 1
+            total_allocated += 1
+        i += 1
+    while total_allocated > n_sample and i < len(ego_order) * 2:
+        ego_id = ego_order[-(i % len(ego_order)) - 1]
+        if allocated.get(ego_id, 0) > 0:
+            allocated[ego_id] = allocated[ego_id] - 1
+            total_allocated -= 1
+        i += 1
+
+    # ── sample ──────────────────────────────────────────────────────────
+    non_conflicts: List[ConflictCandidate] = []
+    for ego_id in ego_ids:
+        n = allocated.get(ego_id, 0)
+        safe = ego_safe_frames.get(ego_id, [])
+        if n <= 0 or not safe:
+            continue
+        rng = random.Random(hash(f"{ego_id}_{scene_id}_{seed}") & 0x7FFFFFFF)
+        for fnum in rng.sample(safe, min(n, len(safe))):
             non_conflicts.append(ConflictCandidate(
                 scene_id=scene_id,
                 ego_id=ego_id,
@@ -704,11 +851,68 @@ def sample_non_conflicts(
     return non_conflicts
 
 
+def _downsample_conflicts_per_scene(
+    conflicts: List[ConflictCandidate],
+    n_target: int,
+    seed: int = 42,
+) -> List[ConflictCandidate]:
+    """Randomly downsample conflicts to *n_target* with deterministic seed."""
+    if len(conflicts) <= n_target:
+        return conflicts
+    import random
+    rng = random.Random(seed)
+    return rng.sample(conflicts, n_target)
+
+
 def detect_all_candidates(
     raw_df: pd.DataFrame,
     cfg: ProcessingConfig,
 ) -> List[ConflictCandidate]:
-    """Run conflict detection then non-conflict sampling; return merged candidate list."""
+    """Run conflict detection then non-conflict sampling; return merged candidate list.
+
+    Per-scene rebalancing (when ``cfg.rebalance_enabled``):
+    - For each scene, conflict count is capped so that the conflict:non-conflict
+      ratio does not exceed *cfg.rebalance_target_ratio*.
+    - This means in scenes with very few safe non-conflict frames (e.g.
+      Peachtree), conflicts are downsampled to restore balance.
+    """
     conflicts = detect_conflicts(raw_df, cfg)
     non_conflicts = sample_non_conflicts(raw_df, cfg, exclude=conflicts)
-    return conflicts + non_conflicts
+
+    if not cfg.rebalance_enabled:
+        return conflicts + non_conflicts
+
+    # ── per-scene rebalance: downsample conflicts if needed ──────────────
+    target_ratio = cfg.rebalance_target_ratio
+    seed = cfg.rebalance_seed
+
+    # Group by scene_id
+    from collections import defaultdict
+    scene_conflicts: Dict[str, List[ConflictCandidate]] = defaultdict(list)
+    scene_non: Dict[str, List[ConflictCandidate]] = defaultdict(list)
+    for c in conflicts:
+        scene_conflicts[c.scene_id].append(c)
+    for n in non_conflicts:
+        scene_non[n.scene_id].append(n)
+
+    balanced_conflicts: List[ConflictCandidate] = []
+    for scene_id in sorted(set(list(scene_conflicts) + list(scene_non))):
+        n_c = len(scene_conflicts.get(scene_id, []))
+        n_n = len(scene_non.get(scene_id, []))
+        if n_n == 0:
+            balanced_conflicts.extend(scene_conflicts[scene_id])
+            continue
+        # Cap conflicts: at most n_non * target_ratio
+        max_c = max(n_n, int(n_n * target_ratio))
+        if n_c > max_c:
+            print(f"  [{scene_id}] downsampling conflicts: {n_c} → {max_c} "
+                  f"(non-conflicts: {n_n}, target ratio: {target_ratio})")
+            balanced_conflicts.extend(
+                _downsample_conflicts_per_scene(
+                    scene_conflicts[scene_id], max_c, seed=seed,
+                )
+            )
+        else:
+            balanced_conflicts.extend(scene_conflicts[scene_id])
+
+    return balanced_conflicts + non_conflicts

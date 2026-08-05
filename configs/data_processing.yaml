@@ -1,8 +1,8 @@
 time:
   history_sec: 8.0
   future_sec: 3.0
-  fps: 10.0  # 10 Hz for NGSIM native data; use 25.0 for upsampled NBDT data
-  conflict_ttc_threshold: 3.0
+  fps: 10.0  # unified 10 Hz for all datasets (inD, CitySim, NGSIM)
+  conflict_ttc_threshold: 1.5
 
 neighbor:
   max_distance_m: 200.0
@@ -15,7 +15,7 @@ neighbor:
     - right_rear
 
 io:
-  raw_dir: data/raw
+  raw_dir: data/raw_subset
   interim_dir: data/interim/candidates
   data_out: data/processed/data/events_data.csv
   label_out: data/processed/labels/events_labels.csv
@@ -23,3 +23,10 @@ io:
 
 split:
   train_val_ratio: 0.8  # 80/20 split by ego; set to null or remove to disable
+
+rebalance:
+  enabled: true
+  target_ratio: 1.0           # target conflict:non-conflict ratio (1.0 = 1:1)
+  balance_conflict_types: false  # whether to also balance per conflict_target_role
+  per_scene: true             # balance independently per scene
+  seed: 42

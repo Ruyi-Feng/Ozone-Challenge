@@ -12,14 +12,25 @@ raw CSV
 
 from __future__ import annotations
 
+import gc
+import random
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Set, Tuple, Union
 
 import pandas as pd
 
 from data_processing.core.conflict_detect import detect_all_candidates
-from data_processing.core.export import export_events
-from data_processing.core.neighbor_filter import extract_neighbors_for_events
+from data_processing.core.export import (
+    export_chunk,
+    export_events,
+    suffix_path,
+    write_csv_headers,
+    write_csv_headers_split,
+)
+from data_processing.core.neighbor_filter import (
+    _precompute_frame_neighbors,
+    extract_neighbors_for_events,
+)
 from data_processing.core.trajectory_window import build_windowed_events
 from data_processing.io.readers import list_raw_csv_files, load_config, load_raw_csv
 from data_processing.io.schema import (
@@ -43,18 +54,28 @@ def run_window_stage(
     raw_df: pd.DataFrame,
     candidates: List[ConflictCandidate],
     cfg: ProcessingConfig,
+    *,
+    car_index: dict | None = None,
 ) -> List[WindowedEventCandidate]:
     """Stage 2 wrapper."""
-    return build_windowed_events(raw_df, candidates, cfg)
+    return build_windowed_events(raw_df, candidates, cfg, car_index=car_index)
 
 
 def run_neighbor_stage(
     raw_df: pd.DataFrame,
     windows: List[WindowedEventCandidate],
     cfg: ProcessingConfig,
+    *,
+    frame_index: dict | None = None,
+    car_index: dict | None = None,
+    neighbor_cache: dict | None = None,
 ) -> List[TrackedNeighborhoodEvent]:
     """Stage 3 wrapper."""
-    return extract_neighbors_for_events(raw_df, windows, cfg)
+    return extract_neighbors_for_events(
+        raw_df, windows, cfg,
+        frame_index=frame_index, car_index=car_index,
+        neighbor_cache=neighbor_cache,
+    )
 
 
 def run_export_stage(
@@ -63,6 +84,24 @@ def run_export_stage(
 ) -> Tuple[str, str, str]:
     """Stage 4 wrapper."""
     return export_events(events, cfg)
+
+
+def _determine_train_egos(
+    windows: List[WindowedEventCandidate],
+    train_ratio: float,
+    seed: int = 42,
+) -> Set:
+    """Pre-compute which ego_ids belong to the training set.
+
+    Mirrors ``split_by_ego`` logic but operates on lightweight window
+    objects so the split can be determined before Stage 3 materializes
+    any DataFrame-heavy ``TrackedNeighborhoodEvent``.
+    """
+    ego_ids = sorted({w.ego_id for w in windows})
+    rng = random.Random(seed)
+    rng.shuffle(ego_ids)
+    n_train = max(1, int(len(ego_ids) * train_ratio))
+    return set(ego_ids[:n_train])
 
 
 def process_raw_dataframe(
@@ -77,7 +116,21 @@ def process_raw_dataframe(
 
     Returns (data_path, label_path, future_traj_path).
     """
+    print(f"Pipeline start: {len(raw_df)} rows, "
+          f"history={cfg.history_sec}s, future={cfg.future_sec}s")
+
     candidates = run_conflict_stage(raw_df, cfg)
+    n_conf = sum(1 for c in candidates if c.is_conflict)
+    n_non = sum(1 for c in candidates if not c.is_conflict)
+    print(f"  → {len(candidates)} candidates ({n_conf} conflict, {n_non} non-conflict)")
+
+    # Pre-build lookup indices so Stages 2–3 don't re-scan the full table.
+    # frame_index: frameNum → DataFrame slice   (used by Stage 3)
+    # car_index:   carId    → DataFrame slice   (used by Stage 2 & 3)
+    print("  building lookup indices …")
+    frame_index = dict(tuple(raw_df.groupby("frameNum")))
+    car_index = dict(tuple(raw_df.groupby("carId")))
+    print(f"  → {len(frame_index)} frame groups, {len(car_index)} vehicle groups")
 
     if dump_interim:
         interim_path = Path(cfg.interim_dir) / interim_name
@@ -92,10 +145,82 @@ def process_raw_dataframe(
             for c in candidates
         ]
         write_interim_candidates(pd.DataFrame(rows), interim_path)
+        print(f"  → interim candidates saved to {interim_path}")
 
-    windows = run_window_stage(raw_df, candidates, cfg)
-    tracked = run_neighbor_stage(raw_df, windows, cfg)
-    return run_export_stage(tracked, cfg)
+    print("  Stage 2/4: window validation …")
+    windows = run_window_stage(raw_df, candidates, cfg, car_index=car_index)
+    print(f"  → {len(windows)} windowed events")
+
+    # Pre-compute neighbor cache once for all chunks
+    print("  precomputing frame-neighbor cache …")
+    neighbor_cache = _precompute_frame_neighbors(frame_index, cfg)
+
+    CHUNK_SIZE = 5000
+    ratio = cfg.train_val_split_ratio
+    split_mode = ratio is not None and 0.0 < ratio < 1.0
+
+    if split_mode:
+        train_egos = _determine_train_egos(windows, ratio)
+        write_csv_headers_split(cfg)
+        train_id = 0
+        val_id = 0
+        n_chunks = (len(windows) + CHUNK_SIZE - 1) // CHUNK_SIZE
+        print(f"  Stage 3+4: {len(windows)} events in "
+              f"{n_chunks} chunks (split mode) …")
+    else:
+        write_csv_headers(cfg)
+        next_id = 0
+        n_chunks = (len(windows) + CHUNK_SIZE - 1) // CHUNK_SIZE
+        print(f"  Stage 3+4: {len(windows)} events in "
+              f"{n_chunks} chunks …")
+
+    total_tracked = 0
+    for i in range(0, len(windows), CHUNK_SIZE):
+        chunk = windows[i:i + CHUNK_SIZE]
+        tracked = run_neighbor_stage(
+            raw_df, chunk, cfg,
+            frame_index=frame_index, car_index=car_index,
+            neighbor_cache=neighbor_cache,
+        )
+        total_tracked += len(tracked)
+
+        if split_mode:
+            train_evts = [e for e in tracked if e.window.ego_id in train_egos]
+            val_evts = [e for e in tracked if e.window.ego_id not in train_egos]
+            train_id = export_chunk(
+                train_evts, cfg,
+                suffix_path(cfg.data_out, "train"),
+                suffix_path(cfg.label_out, "train"),
+                suffix_path(cfg.future_traj_out, "train"),
+                start_id=train_id,
+            )
+            val_id = export_chunk(
+                val_evts, cfg,
+                suffix_path(cfg.data_out, "val"),
+                suffix_path(cfg.label_out, "val"),
+                suffix_path(cfg.future_traj_out, "val"),
+                start_id=val_id,
+            )
+        else:
+            next_id = export_chunk(
+                tracked, cfg,
+                cfg.data_out, cfg.label_out, cfg.future_traj_out,
+                start_id=next_id,
+            )
+
+        del tracked, chunk
+        gc.collect()
+
+    print(f"  → {total_tracked} tracked events, done")
+
+    if split_mode:
+        return (
+            suffix_path(cfg.data_out, "train"),
+            suffix_path(cfg.label_out, "train"),
+            suffix_path(cfg.future_traj_out, "train"),
+        )
+    else:
+        return cfg.data_out, cfg.label_out, cfg.future_traj_out
 
 
 def process_raw_file(

@@ -23,6 +23,8 @@ def load_config(path: Union[str, Path]) -> ProcessingConfig:
     split_cfg = raw.get("split", {})
     train_val_ratio = split_cfg.get("train_val_ratio", None)
 
+    rebalance_cfg = raw.get("rebalance", {})
+
     return ProcessingConfig(
         history_sec=float(time_cfg.get("history_sec", 8.0)),
         future_sec=float(time_cfg.get("future_sec", 3.0)),
@@ -48,6 +50,13 @@ def load_config(path: Union[str, Path]) -> ProcessingConfig:
                 "data/processed/labels/events_future_traj.csv",
             )
         ),
+        rebalance_enabled=bool(rebalance_cfg.get("enabled", False)),
+        rebalance_target_ratio=float(rebalance_cfg.get("target_ratio", 1.0)),
+        rebalance_balance_conflict_types=bool(
+            rebalance_cfg.get("balance_conflict_types", False)
+        ),
+        rebalance_per_scene=bool(rebalance_cfg.get("per_scene", True)),
+        rebalance_seed=int(rebalance_cfg.get("seed", 42)),
     )
 
 
