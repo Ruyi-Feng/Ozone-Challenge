@@ -222,4 +222,4 @@ __marimo__/
 checkpoints/
 
 # Markdown reports (keep locally, exclude from git)
-*.md
+# *.md
