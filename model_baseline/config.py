@@ -16,6 +16,10 @@ class ModelConfig:
     num_features: int = 4
     hidden_dim: int = 64
     num_frames: Optional[int] = None
+    # Transformer-only knobs (ignored by LSTM baseline)
+    n_layers: int = 2
+    n_heads: int = 4
+    dropout: float = 0.1
 
 
 @dataclass
@@ -72,6 +76,9 @@ def load_config(path: str | Path) -> BaselineRuntimeConfig:
             num_features=int(m.get("num_features", 4)),
             hidden_dim=int(m.get("hidden_dim", 64)),
             num_frames=m.get("num_frames"),
+            n_layers=int(m.get("n_layers", 2)),
+            n_heads=int(m.get("n_heads", 4)),
+            dropout=float(m.get("dropout", 0.1)),
         ),
         data=DataPaths(
             data_train=d.get("data_train", DataPaths.data_train),

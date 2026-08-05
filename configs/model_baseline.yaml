@@ -1,16 +1,22 @@
 # Model + data are both selected by the same `model.name` string
 # via data_factory / model_factory registries.
 #
-# Available dataset types:
-#   baseline        — memmap .npy tensor cache (default)
-#   baseline_binary — flat binary file + index CSV, f.seek() on-demand
+# Available model.name values:
+#   baseline        — LSTM encoder + dual heads; memmap .npy tensor cache
+#   baseline_binary — same LSTM; flat binary file + index CSV
+#   transformer     — Transformer encoder + CLS + dual heads; same memmap cache
+#
+# Transformer-only knobs (ignored by LSTM): n_layers, n_heads, dropout
 
 model:
   name: baseline          # registry key → dataset form + network
   num_agents: 7           # ego + 6 neighbor slots
   num_features: 4         # e.g. dx, dy, heading_rel, speed
-  hidden_dim: 64
-  num_frames: 80            # 10 fps × 8 s history
+  hidden_dim: 64          # LSTM hidden / Transformer d_model
+  num_frames: 80          # 10 fps × 8 s history
+  # n_layers: 2           # Transformer encoder layers
+  # n_heads: 4            # Transformer attention heads
+  # dropout: 0.1          # Transformer dropout
 
 data:
   data_train: data/processed/train       # prefix for {train}_x.npy or {train}_data.bin

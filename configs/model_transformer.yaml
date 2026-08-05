@@ -1,0 +1,33 @@
+# Transformer conflict model (same data cache as LSTM baseline).
+# Selected via model.name → data_factory / model_factory registries.
+
+model:
+  name: transformer       # registry key → dataset form + network
+  num_agents: 7           # ego + 6 neighbor slots
+  num_features: 4         # e.g. dx, dy, heading_rel, speed
+  hidden_dim: 64          # Transformer d_model
+  num_frames: 80          # 10 fps × 8 s history
+  n_layers: 2             # Transformer encoder layers
+  n_heads: 4              # attention heads
+  dropout: 0.1
+
+data:
+  data_train: data/processed/train       # prefix for {train}_x.npy
+  label_train: data/processed/labels/events_labels_train.csv
+  data_val: data/processed/val
+  label_val: data/processed/labels/events_labels_val.csv
+
+train:
+  batch_size: 32
+  num_workers: 0
+  lr: 1.0e-3
+  max_epochs: 20
+  seed: 42
+  device: cuda             # cpu | cuda
+
+eval:
+  metrics:
+    - accuracy
+    - precision
+    - recall
+    - f1
