@@ -3,10 +3,13 @@
 Reads the pre-computed memmap .npy arrays and writes:
   - {prefix}_data.bin   — float32 tensor data, one event after another
   - {prefix}_index.csv  — per-event metadata (offset, labels, mask, etc.)
+  - {prefix}_valid.bin  — bit-packed per-frame validity, if {prefix}_valid.npy
+                          exists (see build_tensor_cache.py)
 
 The binary format is simply concatenated float32 [7, 80, 4] tensors.
 Each event occupies exactly 7 × 80 × 4 × 4 = 8960 bytes.
 The byte offset of event N is N × 8960.
+valid.bin packs the [7, 80] bool mask of event N into 70 bytes at N × 70.
 
 Usage (from repo root):
   python data_processing/scripts/build_binary_cache.py
@@ -37,6 +40,7 @@ NUM_AGENTS = 7
 NUM_FRAMES = 80
 NUM_FEATURES = 4
 RECORD_BYTES = NUM_AGENTS * NUM_FRAMES * NUM_FEATURES * 4  # 8960
+VALID_RECORD_BYTES = (NUM_AGENTS * NUM_FRAMES + 7) // 8  # 70
 
 
 def _load_labels(prefix: str) -> pd.DataFrame:
@@ -72,6 +76,15 @@ def process_split(prefix: str, name: str) -> None:
     N = len(x)
     assert x.shape == (N, NUM_AGENTS, NUM_FRAMES, NUM_FEATURES), \
         f"Unexpected x shape: {x.shape}"
+
+    valid_npy = Path(f"{prefix}_valid.npy")
+    valid = np.load(str(valid_npy), mmap_mode="r") if valid_npy.exists() else None
+    if valid is None:
+        print(f"  WARNING: {valid_npy} not found — skipping {prefix}_valid.bin "
+              f"(run build_tensor_cache.py [--valid-only] first)")
+    else:
+        assert valid.shape == (N, NUM_AGENTS, NUM_FRAMES), \
+            f"valid.npy shape {valid.shape} does not match cache N={N}"
 
     # ── Try to load labels CSV for scene_id / conflict_target_role ──────
     labels_df = _load_labels(prefix)
@@ -115,6 +128,19 @@ def process_split(prefix: str, name: str) -> None:
             })
 
         f.flush()
+
+    # ── Write bit-packed validity file (index-aligned, 70 B/event) ──────
+    if valid is not None:
+        vbin_path = f"{prefix}_valid.bin"
+        with open(vbin_path, "wb") as vf:
+            for i in range(N):
+                bits = np.packbits(
+                    np.asarray(valid[i], dtype=bool).reshape(-1)
+                )
+                assert bits.nbytes == VALID_RECORD_BYTES
+                vf.write(bits.tobytes())
+        print(f"  [{name}] {vbin_path} "
+              f"({Path(vbin_path).stat().st_size / 1024:.0f} KB)")
 
     # ── Write index CSV ─────────────────────────────────────────────────
     index_path = f"{prefix}_index.csv"

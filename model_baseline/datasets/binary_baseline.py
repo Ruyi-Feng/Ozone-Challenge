@@ -7,6 +7,9 @@ Sample contract (same as BaselineConflictDataset):
   __getitem__ → dict with:
     - "x":           FloatTensor [A, T, F]  multi-agent history
     - "agent_mask":  BoolTensor  [A]        True if slot has a vehicle
+    - "valid_mask":  BoolTensor  [A, T]     True = real observation; falls back
+                       to agent_mask broadcast over T when {prefix}_valid.bin
+                       is absent (see has_valid_mask)
     - "is_conflict": FloatTensor  scalar    0.0 / 1.0
     - "target_idx":  LongTensor   scalar    neighbor slot index in {0..5}, or -1
     - "event_id":    int                     for debugging
@@ -78,6 +81,7 @@ class BinaryBaselineDataset(Dataset):
         # ── Paths ───────────────────────────────────────────────────────
         prefix = data_path  # e.g. "data/processed/train"
         self._bin_path = f"{prefix}_data.bin"
+        self._valid_path = f"{prefix}_valid.bin"
         index_path = f"{prefix}_index.csv"
 
         if not Path(self._bin_path).exists():
@@ -86,9 +90,16 @@ class BinaryBaselineDataset(Dataset):
                 f"Run build_binary_cache.py first."
             )
 
+        self.has_valid_mask = Path(self._valid_path).exists()
+        if not self.has_valid_mask:
+            print(f"  [{split}] NOTE: {self._valid_path} not found — "
+                  f"valid_mask falls back to all-valid for present agents")
+
         # ── Load index into memory ──────────────────────────────────────
         self._index = pd.read_csv(index_path)
         self._record_size = num_agents * self.num_frames * num_features * 4
+        # bit-packed [A, T] bool per event (see build_binary_cache.py)
+        self._valid_record_size = (num_agents * self.num_frames + 7) // 8
 
         # Verify record size consistency
         if len(self._index) > 0:
@@ -116,6 +127,12 @@ class BinaryBaselineDataset(Dataset):
         if not hasattr(self._local, "fh") or self._local.fh is None:
             self._local.fh = open(self._bin_path, "rb")
         return self._local.fh
+
+    def _get_valid_handle(self):
+        """Lazy per-worker handle for {prefix}_valid.bin (same pattern)."""
+        if not hasattr(self._local, "vfh") or self._local.vfh is None:
+            self._local.vfh = open(self._valid_path, "rb")
+        return self._local.vfh
 
     def __getstate__(self):
         """Exclude file handles from pickling (needed for spawn mp)."""
@@ -153,9 +170,29 @@ class BinaryBaselineDataset(Dataset):
             dtype=bool,
         )
 
+        # Per-frame validity: bit-packed record aligned with the cache row
+        # order (row position = byte_offset / record_size, robust to any
+        # future filtering of the index CSV).
+        if self.has_valid_mask:
+            cache_row = int(row["byte_offset"]) // self._record_size
+            vfh = self._get_valid_handle()
+            vfh.seek(cache_row * self._valid_record_size)
+            raw_v = vfh.read(self._valid_record_size)
+            valid_mask = (
+                np.unpackbits(np.frombuffer(raw_v, dtype=np.uint8))
+                [: self.num_agents * self.num_frames]
+                .reshape(self.num_agents, self.num_frames)
+                .astype(bool)
+            )
+        else:
+            valid_mask = np.repeat(
+                agent_mask[:, None], self.num_frames, axis=1
+            )
+
         return {
             "x": torch.from_numpy(x),
             "agent_mask": torch.from_numpy(agent_mask),
+            "valid_mask": torch.from_numpy(valid_mask),
             "is_conflict": torch.tensor(
                 float(row["is_conflict"]), dtype=torch.float32
             ),
@@ -163,4 +200,24 @@ class BinaryBaselineDataset(Dataset):
                 int(row["target_idx"]), dtype=torch.long
             ),
             "event_id": int(row["event_id"]),
+        }
+
+    # ------------------------------------------------------------------
+    # Metadata access (used by the attribution driver for sample selection)
+    # ------------------------------------------------------------------
+
+    def get_metadata(self, index: int) -> dict[str, Any]:
+        """Index-CSV metadata for one event, without reading tensor data."""
+        row = self._index.iloc[index]
+
+        def _s(key: str) -> str:
+            val = row.get(key, "")
+            return "" if pd.isna(val) else str(val)
+
+        return {
+            "event_id": int(row["event_id"]),
+            "scene_id": _s("scene_id"),
+            "conflict_target_role": _s("conflict_target_role"),
+            "is_conflict": int(row["is_conflict"]),
+            "target_idx": int(row["target_idx"]),
         }
