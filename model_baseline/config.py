@@ -33,6 +33,30 @@ class DataPaths:
 
 
 @dataclass
+class MaskingConfig:
+    """Masked surrogate training (prerequisite for Winter-Shapley attribution).
+
+    enabled=False (default) keeps the ORIGINAL training behaviour untouched:
+    no time/channel masks are passed to the model and padding frames stay
+    visible, exactly as before this option existed.
+
+    When enabled, each sample sees the full input with probability p_full
+    (padding frames blocked via ~valid_mask), otherwise a random
+    nested-permutation coalition prefix — the same distribution the Winter
+    MC estimator walks at explanation time (model_baseline/masking.py).
+    """
+
+    enabled: bool = False
+    p_full: float = 0.4
+    seg_len_frames: tuple[int, ...] = (5, 10, 20)
+    hierarchies: tuple[str, ...] = ("agent_major", "time_major")
+    order_modes: tuple[str, ...] = ("uniform", "chrono", "reverse")
+    require_valid: bool = True
+    val_seed: int = 1234
+    val_selection: str = "mixture"  # "mixture" | "full"
+
+
+@dataclass
 class TrainConfig:
     batch_size: int = 32
     num_workers: int = 0
@@ -40,6 +64,7 @@ class TrainConfig:
     max_epochs: int = 20
     seed: int = 42
     device: str = "cpu"
+    masking: MaskingConfig = field(default_factory=MaskingConfig)
 
 
 @dataclass
@@ -57,6 +82,19 @@ class BaselineRuntimeConfig:
     data: DataPaths = field(default_factory=DataPaths)
     train: TrainConfig = field(default_factory=TrainConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
+
+
+def _load_masking(mk: dict[str, Any]) -> MaskingConfig:
+    return MaskingConfig(
+        enabled=bool(mk.get("enabled", False)),
+        p_full=float(mk.get("p_full", 0.4)),
+        seg_len_frames=tuple(int(v) for v in mk.get("seg_len_frames", (5, 10, 20))),
+        hierarchies=tuple(str(v) for v in mk.get("hierarchies", ("agent_major", "time_major"))),
+        order_modes=tuple(str(v) for v in mk.get("order_modes", ("uniform", "chrono", "reverse"))),
+        require_valid=bool(mk.get("require_valid", True)),
+        val_seed=int(mk.get("val_seed", 1234)),
+        val_selection=str(mk.get("val_selection", "mixture")),
+    )
 
 
 def load_config(path: str | Path) -> BaselineRuntimeConfig:
@@ -95,6 +133,7 @@ def load_config(path: str | Path) -> BaselineRuntimeConfig:
             max_epochs=int(t.get("max_epochs", 20)),
             seed=int(t.get("seed", 42)),
             device=str(t.get("device", "cpu")),
+            masking=_load_masking(t.get("masking", {}) or {}),
         ),
         eval=EvalConfig(
             metrics=list(e.get("metrics", ["accuracy", "precision", "recall", "f1"])),

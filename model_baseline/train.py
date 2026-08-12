@@ -8,8 +8,9 @@ Flow:
 from __future__ import annotations
 
 import random
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 
@@ -19,8 +20,13 @@ try:
 except ImportError:
     torch = None  # type: ignore
 
-from model_baseline.config import BaselineRuntimeConfig, load_config
+from model_baseline.config import (
+    BaselineRuntimeConfig,
+    MaskingConfig,
+    load_config,
+)
 from model_baseline.factories import build_dataset, build_model
+from model_baseline.masking import MaskSamplerConfig, TrainingMaskSampler
 
 
 def _require_torch() -> None:
@@ -78,6 +84,68 @@ def build_dataloaders(
 
 
 # ---------------------------------------------------------------------------
+# Masked-training helpers (no-ops unless train.masking.enabled)
+# ---------------------------------------------------------------------------
+
+
+def _sampler_cfg(mcfg: MaskingConfig) -> MaskSamplerConfig:
+    return MaskSamplerConfig(
+        p_full=mcfg.p_full,
+        seg_len_frames=tuple(mcfg.seg_len_frames),
+        hierarchies=tuple(mcfg.hierarchies),
+        order_modes=tuple(mcfg.order_modes),
+    )
+
+
+def _disable_nested_tensor(model: Any) -> None:
+    """Force the vanilla (non-nested-tensor) encoder path.
+
+    The SDPA/nested-tensor fast path activates in eval() with a key padding
+    mask and produces small fp differences vs. the training path — bad for
+    reproducible masked values.  Only called in the masked regime; the
+    original training path is left untouched.
+    """
+    enc = getattr(model, "encoder", None)
+    if enc is None:
+        return
+    for attr in ("enable_nested_tensor", "use_nested_tensor"):
+        if hasattr(enc, attr):
+            setattr(enc, attr, False)
+
+
+def _masked_forward(
+    model: Any,
+    batch: dict[str, Any],
+    x: "torch.Tensor",
+    agent_mask: "torch.Tensor",
+    device: torch.device,
+    mask_sampler: Optional[TrainingMaskSampler],
+    use_valid_mask: bool,
+) -> dict[str, "torch.Tensor"]:
+    """Forward with the regime selected by (mask_sampler, use_valid_mask).
+
+    Neither set → the ORIGINAL call signature, byte-identical behaviour.
+    """
+    if mask_sampler is not None:
+        tm_np, cm_np = mask_sampler.sample_batch(
+            batch["valid_mask"].numpy(), batch["agent_mask"].numpy()
+        )
+        return model(
+            x,
+            agent_mask=agent_mask,
+            time_mask=torch.from_numpy(tm_np).to(device),
+            channel_mask=torch.from_numpy(cm_np).to(device),
+        )
+    if use_valid_mask:
+        return model(
+            x,
+            agent_mask=agent_mask,
+            time_mask=~batch["valid_mask"].to(device),
+        )
+    return model(x, agent_mask=agent_mask)
+
+
+# ---------------------------------------------------------------------------
 # One epoch
 # ---------------------------------------------------------------------------
 
@@ -87,8 +155,12 @@ def train_one_epoch(
     loader: Any,
     optimizer: Any,
     device: torch.device,
+    mask_sampler: Optional[TrainingMaskSampler] = None,
 ) -> dict[str, float]:
-    """Run one training epoch.  Returns average losses."""
+    """Run one training epoch.  Returns average losses.
+
+    mask_sampler=None reproduces the original full-input training exactly.
+    """
     model.train()
     total_loss = 0.0
     total_conflict = 0.0
@@ -101,7 +173,9 @@ def train_one_epoch(
         is_conflict = batch["is_conflict"].to(device)
         target_idx = batch["target_idx"].to(device)
 
-        outputs = model(x, agent_mask=agent_mask)
+        outputs = _masked_forward(
+            model, batch, x, agent_mask, device, mask_sampler, False
+        )
         loss_dict = model.compute_loss(outputs, is_conflict, target_idx)
 
         optimizer.zero_grad()
@@ -131,8 +205,16 @@ def validate(
     model: Any,
     loader: Any,
     device: torch.device,
+    use_valid_mask: bool = False,
+    mask_sampler: Optional[TrainingMaskSampler] = None,
 ) -> dict[str, float]:
-    """Validation pass — losses + conflict accuracy + target accuracy."""
+    """Validation pass — losses + conflict accuracy + target accuracy.
+
+    Defaults reproduce the original full-input validation exactly.
+    use_valid_mask=True blocks padding frames (masked regime's "full input");
+    mask_sampler draws random coalitions (masked validation; pass a sampler
+    freshly seeded with masking.val_seed so epochs are comparable).
+    """
     model.eval()
     total_loss = 0.0
     total_conflict = 0.0
@@ -148,7 +230,9 @@ def validate(
         is_conflict = batch["is_conflict"].to(device)
         target_idx = batch["target_idx"].to(device)
 
-        outputs = model(x, agent_mask=agent_mask)
+        outputs = _masked_forward(
+            model, batch, x, agent_mask, device, mask_sampler, use_valid_mask
+        )
         loss_dict = model.compute_loss(outputs, is_conflict, target_idx)
 
         bs = x.size(0)
@@ -208,16 +292,67 @@ def run_train(cfg: BaselineRuntimeConfig) -> None:
     print(f"Train samples: {len(train_loader.dataset)}, "
           f"Val samples: {len(val_loader.dataset)}")
 
+    # --- Masked surrogate regime (opt-in; default = original behaviour) ---
+    masking_cfg = getattr(cfg.train, "masking", None)
+    masking_on = bool(masking_cfg and masking_cfg.enabled)
+    mask_sampler: Optional[TrainingMaskSampler] = None
+    if masking_on:
+        for ds, tag in ((train_loader.dataset, "train"),
+                        (val_loader.dataset, "val")):
+            if masking_cfg.require_valid and not getattr(ds, "has_valid_mask", False):
+                raise RuntimeError(
+                    f"train.masking.enabled=true but the {tag} cache has no "
+                    f"per-frame validity mask — padded frames would enter the "
+                    f"coalition game. Run: python data_processing/scripts/"
+                    f"build_tensor_cache.py --valid-only  (then "
+                    f"build_binary_cache.py), or set masking.require_valid: false."
+                )
+        _disable_nested_tensor(model)
+        mask_sampler = TrainingMaskSampler(
+            _sampler_cfg(masking_cfg),
+            num_features=cfg.model.num_features,
+            seed=cfg.train.seed,
+        )
+        print(f"Masked surrogate training ON: p_full={masking_cfg.p_full}, "
+              f"seg_len={masking_cfg.seg_len_frames}, "
+              f"orders={masking_cfg.order_modes}, "
+              f"val_selection={masking_cfg.val_selection}")
+
     # --- Optimizer ---
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.train.lr)
 
     # --- Loop ---
     best_val_loss = float("inf")
     for epoch in range(1, cfg.train.max_epochs + 1):
-        train_metrics = train_one_epoch(model, train_loader, optimizer, device)
-        val_metrics = validate(model, val_loader, device)
+        train_metrics = train_one_epoch(
+            model, train_loader, optimizer, device, mask_sampler=mask_sampler
+        )
 
-        print(
+        if masking_on:
+            # "full input" in the masked regime = padding frames blocked
+            val_metrics = validate(model, val_loader, device, use_valid_mask=True)
+            # masked validation with a fixed seed → comparable across epochs
+            masked_val = validate(
+                model, val_loader, device,
+                mask_sampler=TrainingMaskSampler(
+                    _sampler_cfg(masking_cfg),
+                    num_features=cfg.model.num_features,
+                    seed=masking_cfg.val_seed,
+                ),
+            )
+            if masking_cfg.val_selection == "mixture":
+                select_loss = (
+                    masking_cfg.p_full * val_metrics["loss"]
+                    + (1.0 - masking_cfg.p_full) * masked_val["loss"]
+                )
+            else:
+                select_loss = val_metrics["loss"]
+        else:
+            val_metrics = validate(model, val_loader, device)
+            masked_val = None
+            select_loss = val_metrics["loss"]
+
+        line = (
             f"Epoch {epoch:3d}/{cfg.train.max_epochs} | "
             f"train loss={train_metrics['loss']:.4f} "
             f"(c={train_metrics['conflict_loss']:.4f} "
@@ -226,10 +361,15 @@ def run_train(cfg: BaselineRuntimeConfig) -> None:
             f"c_acc={val_metrics['conflict_acc']:.4f} "
             f"t_acc={val_metrics['target_acc']:.4f}"
         )
+        if masked_val is not None:
+            line += (f" | masked val loss={masked_val['loss']:.4f} "
+                     f"c_acc={masked_val['conflict_acc']:.4f} "
+                     f"(select={select_loss:.4f})")
+        print(line)
 
         # Save best
-        if val_metrics["loss"] < best_val_loss:
-            best_val_loss = val_metrics["loss"]
+        if select_loss < best_val_loss:
+            best_val_loss = select_loss
             ckpt_path = Path("checkpoints")
             ckpt_path.mkdir(exist_ok=True)
             torch.save(
@@ -238,13 +378,21 @@ def run_train(cfg: BaselineRuntimeConfig) -> None:
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "val_loss": val_metrics["loss"],
+                    "select_loss": select_loss,
                     "config": cfg,
+                    # attribution driver asserts on this tag: only checkpoints
+                    # trained under the masked regime yield a well-defined v(S)
+                    "train_regime": {
+                        "masked": masking_on,
+                        "uses_valid_mask": masking_on,
+                        "masking": asdict(masking_cfg) if masking_on else None,
+                    },
                 },
                 ckpt_path / "best_model.pt",
             )
-            print(f"  → saved checkpoint (val_loss={best_val_loss:.4f})")
+            print(f"  → saved checkpoint (select_loss={best_val_loss:.4f})")
 
-    print(f"Training finished. Best val loss: {best_val_loss:.4f}")
+    print(f"Training finished. Best selection loss: {best_val_loss:.4f}")
 
 
 def main(config_path: str | Path = "configs/model_baseline.yaml") -> None:

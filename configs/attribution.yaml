@@ -1,0 +1,42 @@
+# Winter-Shapley attribution run configuration.
+#
+# Prerequisites (in order):
+#   1. per-frame validity cache:
+#        python data_processing/scripts/build_tensor_cache.py --valid-only
+#        python data_processing/scripts/build_binary_cache.py
+#   2. checkpoint trained under the masked surrogate regime:
+#        python model_baseline/scripts/run_train.py --config configs/model_transformer_masked.yaml
+# Then:
+#   python -m model_baseline.attribution.driver --config configs/attribution.yaml
+
+checkpoint: checkpoints/best_model.pt
+data_prefix: data/processed/val
+device: cuda                     # cpu | cuda
+allow_unmasked_checkpoint: false # true = case studies on an unmasked model (OOD!)
+
+selection:
+  conflict_only: true
+  roles: []                      # e.g. [front, left_front]; empty = all
+  scenes: []                     # substring match on scene_id; empty = all
+  event_ids: []                  # explicit allowlist; empty = all
+  max_n: 100                     # 0 = no cap
+
+game:
+  seg_len_frames: 10             # 1 s per segment at 10 fps → 8 segments / 8 s
+  # boundaries: [0, 30, 60]      # semantic cut (ascending frame starts), overrides seg_len
+  readouts: [symmetric, chrono]  # + reverse (proximate sufficiency) if wanted
+  target: conflict_logit         # conflict_logit | target_logit
+
+mc:
+  n_samples: 25                  # MC chains per readout
+  batch_size: 32
+  seed: 20260810
+
+exact:
+  enabled: false                 # exact per-agent segment Shapley (case studies)
+  agents: [0]                    # slot indices (0 = ego)
+  max_players: 16                # hard gate: 2^16 = 65k forwards per agent
+
+output:
+  dir: outputs/attribution/run_001
+  save_per_event: true

@@ -1,0 +1,51 @@
+# Transformer conflict model — MASKED SURROGATE regime.
+#
+# Same architecture/data as configs/model_transformer.yaml; the only
+# difference is train.masking, which turns on coalition-masked training.
+# This is the prerequisite for Winter-Shapley attribution: v(S) is only
+# well-defined on a checkpoint trained under this regime (the attribution
+# driver refuses checkpoints without the train_regime.masked tag).
+#
+# Requires the per-frame validity cache:
+#   python data_processing/scripts/build_tensor_cache.py --valid-only
+#   python data_processing/scripts/build_binary_cache.py
+
+model:
+  name: transformer       # registry key → dataset form + network
+  num_agents: 7           # ego + 6 neighbor slots
+  num_features: 4         # dx, dy, heading_rel, speed
+  hidden_dim: 64          # Transformer d_model
+  num_frames: 80          # 10 fps × 8 s history
+  n_layers: 2             # Transformer encoder layers
+  n_heads: 4              # attention heads
+  dropout: 0.1
+
+data:
+  data_train: data/processed/train       # prefix for {train}_x.npy
+  label_train: data/processed/labels/events_labels_train.csv
+  data_val: data/processed/val
+  label_val: data/processed/labels/events_labels_val.csv
+
+train:
+  batch_size: 32
+  num_workers: 0
+  lr: 1.0e-3
+  max_epochs: 20
+  seed: 42
+  device: cuda             # cpu | cuda
+  masking:
+    enabled: true
+    p_full: 0.4                 # prob of full input (keeps predictive quality)
+    seg_len_frames: [5, 10, 20] # mixture — no single cut baked into surrogate
+    hierarchies: [agent_major, time_major]
+    order_modes: [uniform, chrono, reverse]
+    require_valid: true         # refuse caches without {prefix}_valid.npy
+    val_seed: 1234              # fixed coalition seed for masked validation
+    val_selection: mixture      # checkpoint selection: mixture | full
+
+eval:
+  metrics:
+    - accuracy
+    - precision
+    - recall
+    - f1
