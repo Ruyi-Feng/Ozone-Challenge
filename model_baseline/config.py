@@ -12,6 +12,11 @@ import yaml
 @dataclass
 class ModelConfig:
     name: str = "baseline"
+    # Free-form unique identifier for this model/run.  When set, it is
+    # prepended to the checkpoint filename ("{tag}_best_model.pt") so
+    # different trainings never overwrite each other.  Empty = legacy
+    # "best_model.pt" (original behaviour).
+    tag: str = ""
     num_agents: int = 7
     num_features: int = 4
     hidden_dim: int = 64
@@ -33,6 +38,30 @@ class DataPaths:
 
 
 @dataclass
+class MaskingConfig:
+    """Masked surrogate training (prerequisite for Winter-Shapley attribution).
+
+    enabled=False (default) keeps the ORIGINAL training behaviour untouched:
+    no time/channel masks are passed to the model and padding frames stay
+    visible, exactly as before this option existed.
+
+    When enabled, each sample sees the full input with probability p_full
+    (padding frames blocked via ~valid_mask), otherwise a random
+    nested-permutation coalition prefix — the same distribution the Winter
+    MC estimator walks at explanation time (model_baseline/masking.py).
+    """
+
+    enabled: bool = False
+    p_full: float = 0.4
+    seg_len_frames: tuple[int, ...] = (5, 10, 20)
+    hierarchies: tuple[str, ...] = ("agent_major", "time_major")
+    order_modes: tuple[str, ...] = ("uniform", "chrono", "reverse")
+    require_valid: bool = True
+    val_seed: int = 1234
+    val_selection: str = "mixture"  # "mixture" | "full"
+
+
+@dataclass
 class TrainConfig:
     batch_size: int = 32
     num_workers: int = 0
@@ -40,6 +69,7 @@ class TrainConfig:
     max_epochs: int = 20
     seed: int = 42
     device: str = "cpu"
+    masking: MaskingConfig = field(default_factory=MaskingConfig)
 
 
 @dataclass
@@ -59,6 +89,30 @@ class BaselineRuntimeConfig:
     eval: EvalConfig = field(default_factory=EvalConfig)
 
 
+def checkpoint_filename(model: ModelConfig) -> str:
+    """Checkpoint file name for a model config.
+
+    model.tag (if set) is prepended for uniqueness; an empty tag keeps the
+    legacy name.  getattr guards configs unpickled from old checkpoints
+    that predate the tag field.
+    """
+    tag = str(getattr(model, "tag", "") or "").strip()
+    return f"{tag}_best_model.pt" if tag else "best_model.pt"
+
+
+def _load_masking(mk: dict[str, Any]) -> MaskingConfig:
+    return MaskingConfig(
+        enabled=bool(mk.get("enabled", False)),
+        p_full=float(mk.get("p_full", 0.4)),
+        seg_len_frames=tuple(int(v) for v in mk.get("seg_len_frames", (5, 10, 20))),
+        hierarchies=tuple(str(v) for v in mk.get("hierarchies", ("agent_major", "time_major"))),
+        order_modes=tuple(str(v) for v in mk.get("order_modes", ("uniform", "chrono", "reverse"))),
+        require_valid=bool(mk.get("require_valid", True)),
+        val_seed=int(mk.get("val_seed", 1234)),
+        val_selection=str(mk.get("val_selection", "mixture")),
+    )
+
+
 def load_config(path: str | Path) -> BaselineRuntimeConfig:
     """Load YAML config into BaselineRuntimeConfig."""
     with open(path, "r", encoding="utf-8") as f:
@@ -72,6 +126,7 @@ def load_config(path: str | Path) -> BaselineRuntimeConfig:
     return BaselineRuntimeConfig(
         model=ModelConfig(
             name=m.get("name", "baseline"),
+            tag=str(m.get("tag", "") or "").strip(),
             num_agents=int(m.get("num_agents", 7)),
             num_features=int(m.get("num_features", 4)),
             hidden_dim=int(m.get("hidden_dim", 64)),
@@ -95,6 +150,7 @@ def load_config(path: str | Path) -> BaselineRuntimeConfig:
             max_epochs=int(t.get("max_epochs", 20)),
             seed=int(t.get("seed", 42)),
             device=str(t.get("device", "cpu")),
+            masking=_load_masking(t.get("masking", {}) or {}),
         ),
         eval=EvalConfig(
             metrics=list(e.get("metrics", ["accuracy", "precision", "recall", "f1"])),

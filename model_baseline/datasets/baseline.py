@@ -6,6 +6,10 @@ Sample contract (consumed by BaselineConflictModel):
   __getitem__ → dict with:
     - "x":           FloatTensor [A, T, F]  multi-agent history
     - "agent_mask":  BoolTensor  [A]        True if slot has a vehicle
+    - "valid_mask":  BoolTensor  [A, T]     True = real observation (False =
+                       front zero-padding / missing frame / empty slot).
+                       Falls back to agent_mask broadcast over T when the
+                       cache has no {prefix}_valid.npy (see has_valid_mask).
     - "is_conflict": FloatTensor  scalar    0.0 / 1.0
     - "target_idx":  LongTensor   scalar    neighbor slot index in {0..5}, or -1
     - "event_id":    int                     for debugging
@@ -76,6 +80,17 @@ class BaselineConflictDataset(Dataset):
         self._target = np.load(f"{prefix}_target.npy", mmap_mode="r")
         self._event_ids = np.load(f"{prefix}_eid.npy", mmap_mode="r")
 
+        # Optional per-frame validity mask (build_tensor_cache.py [--valid-only])
+        valid_path = Path(f"{prefix}_valid.npy")
+        if valid_path.exists():
+            self._valid = np.load(str(valid_path), mmap_mode="r")
+            self.has_valid_mask = True
+        else:
+            self._valid = None
+            self.has_valid_mask = False
+            print(f"  [{split}] NOTE: {valid_path} not found — valid_mask "
+                  f"falls back to all-valid for present agents")
+
         # Build event_id → index for debugging
         self._eid_to_idx = {int(eid): i for i, eid in enumerate(self._event_ids)}
 
@@ -91,9 +106,18 @@ class BaselineConflictDataset(Dataset):
     # ------------------------------------------------------------------
 
     def __getitem__(self, index: int) -> dict[str, Any]:
+        agent_mask = self._mask[index].copy()
+        if self._valid is not None:
+            valid_mask = self._valid[index].copy()
+        else:
+            # Fallback: every frame of a present agent counts as observed
+            valid_mask = np.repeat(
+                agent_mask[:, None], self._x.shape[2], axis=1
+            )
         return {
             "x": torch.from_numpy(self._x[index].copy()),
-            "agent_mask": torch.from_numpy(self._mask[index].copy()),
+            "agent_mask": torch.from_numpy(agent_mask),
+            "valid_mask": torch.from_numpy(valid_mask),
             "is_conflict": torch.tensor(float(self._y[index]), dtype=torch.float32),
             "target_idx": torch.tensor(int(self._target[index]), dtype=torch.long),
             "event_id": int(self._event_ids[index]),
