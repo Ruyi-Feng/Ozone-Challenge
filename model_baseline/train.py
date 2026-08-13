@@ -23,6 +23,7 @@ except ImportError:
 from model_baseline.config import (
     BaselineRuntimeConfig,
     MaskingConfig,
+    checkpoint_filename,
     load_config,
 )
 from model_baseline.factories import build_dataset, build_model
@@ -372,6 +373,7 @@ def run_train(cfg: BaselineRuntimeConfig) -> None:
             best_val_loss = select_loss
             ckpt_path = Path("checkpoints")
             ckpt_path.mkdir(exist_ok=True)
+            ckpt_file = ckpt_path / checkpoint_filename(cfg.model)
             torch.save(
                 {
                     "epoch": epoch,
@@ -380,6 +382,7 @@ def run_train(cfg: BaselineRuntimeConfig) -> None:
                     "val_loss": val_metrics["loss"],
                     "select_loss": select_loss,
                     "config": cfg,
+                    "tag": getattr(cfg.model, "tag", ""),
                     # attribution driver asserts on this tag: only checkpoints
                     # trained under the masked regime yield a well-defined v(S)
                     "train_regime": {
@@ -388,9 +391,10 @@ def run_train(cfg: BaselineRuntimeConfig) -> None:
                         "masking": asdict(masking_cfg) if masking_on else None,
                     },
                 },
-                ckpt_path / "best_model.pt",
+                ckpt_file,
             )
-            print(f"  → saved checkpoint (select_loss={best_val_loss:.4f})")
+            print(f"  → saved checkpoint {ckpt_file} "
+                  f"(select_loss={best_val_loss:.4f})")
 
     print(f"Training finished. Best selection loss: {best_val_loss:.4f}")
 

@@ -12,6 +12,11 @@ import yaml
 @dataclass
 class ModelConfig:
     name: str = "baseline"
+    # Free-form unique identifier for this model/run.  When set, it is
+    # prepended to the checkpoint filename ("{tag}_best_model.pt") so
+    # different trainings never overwrite each other.  Empty = legacy
+    # "best_model.pt" (original behaviour).
+    tag: str = ""
     num_agents: int = 7
     num_features: int = 4
     hidden_dim: int = 64
@@ -84,6 +89,17 @@ class BaselineRuntimeConfig:
     eval: EvalConfig = field(default_factory=EvalConfig)
 
 
+def checkpoint_filename(model: ModelConfig) -> str:
+    """Checkpoint file name for a model config.
+
+    model.tag (if set) is prepended for uniqueness; an empty tag keeps the
+    legacy name.  getattr guards configs unpickled from old checkpoints
+    that predate the tag field.
+    """
+    tag = str(getattr(model, "tag", "") or "").strip()
+    return f"{tag}_best_model.pt" if tag else "best_model.pt"
+
+
 def _load_masking(mk: dict[str, Any]) -> MaskingConfig:
     return MaskingConfig(
         enabled=bool(mk.get("enabled", False)),
@@ -110,6 +126,7 @@ def load_config(path: str | Path) -> BaselineRuntimeConfig:
     return BaselineRuntimeConfig(
         model=ModelConfig(
             name=m.get("name", "baseline"),
+            tag=str(m.get("tag", "") or "").strip(),
             num_agents=int(m.get("num_agents", 7)),
             num_features=int(m.get("num_features", 4)),
             hidden_dim=int(m.get("hidden_dim", 64)),

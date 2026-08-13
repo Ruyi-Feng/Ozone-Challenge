@@ -12,6 +12,7 @@
 
 model:
   name: transformer       # registry key → dataset form + network
+  tag: transformer_masked # unique run ID → checkpoints/transformer_masked_best_model.pt
   num_agents: 7           # ego + 6 neighbor slots
   num_features: 4         # dx, dy, heading_rel, speed
   hidden_dim: 64          # Transformer d_model

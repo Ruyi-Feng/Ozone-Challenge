@@ -9,7 +9,7 @@
 # Then:
 #   python -m model_baseline.attribution.driver --config configs/attribution.yaml
 
-checkpoint: checkpoints/best_model.pt
+checkpoint: checkpoints/transformer_masked_best_model.pt
 data_prefix: data/processed/val
 device: cuda                     # cpu | cuda
 allow_unmasked_checkpoint: false # true = case studies on an unmasked model (OOD!)

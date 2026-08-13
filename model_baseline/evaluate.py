@@ -14,7 +14,11 @@ try:
 except ImportError:
     torch = None  # type: ignore
 
-from model_baseline.config import BaselineRuntimeConfig, load_config
+from model_baseline.config import (
+    BaselineRuntimeConfig,
+    checkpoint_filename,
+    load_config,
+)
 from model_baseline.factories import build_dataset, build_model
 
 # Neighbor slot → model target index mapping (consistent with baseline.py)
@@ -191,7 +195,8 @@ def main(
 ) -> None:
     cfg = load_config(config_path)
     if checkpoint is None:
-        default_ckpt = Path("checkpoints/best_model.pt")
+        # resolves to checkpoints/{tag}_best_model.pt when model.tag is set
+        default_ckpt = Path("checkpoints") / checkpoint_filename(cfg.model)
         if default_ckpt.exists():
             checkpoint = str(default_ckpt)
     run_eval(cfg, checkpoint=checkpoint)

@@ -200,3 +200,21 @@ def test_run_train_default_path_unchanged(tmp_path, monkeypatch):
         tmp_path / "checkpoints" / "best_model.pt", weights_only=False
     )
     assert ckpt["train_regime"]["masked"] is False
+
+
+def test_run_train_tag_prefixes_checkpoint_name(tmp_path, monkeypatch):
+    """model.tag=foo → checkpoints/foo_best_model.pt; empty tag keeps legacy name."""
+    monkeypatch.chdir(tmp_path)
+    prefix = str(tmp_path / "train")
+    _write_cache(prefix, with_valid=False)
+
+    cfg = _tiny_cfg(prefix, MaskingConfig(enabled=False))
+    cfg.model.tag = "foo"
+    run_train(cfg)
+
+    tagged = tmp_path / "checkpoints" / "foo_best_model.pt"
+    assert tagged.exists()
+    assert not (tmp_path / "checkpoints" / "best_model.pt").exists()
+    ckpt = torch.load(tagged, weights_only=False)
+    assert ckpt["tag"] == "foo"
+    assert ckpt["config"].model.tag == "foo"

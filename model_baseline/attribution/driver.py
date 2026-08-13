@@ -3,7 +3,7 @@
 Usage (from repo root):
   python -m model_baseline.attribution.driver --config configs/attribution.yaml
   python -m model_baseline.attribution.driver --config configs/attribution.yaml \
-      --checkpoint checkpoints/best_model.pt --max-n 5
+      --checkpoint checkpoints/transformer_masked_best_model.pt --max-n 5
 """
 
 from __future__ import annotations
