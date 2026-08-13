@@ -15,7 +15,7 @@ neighbor:
     - right_rear
 
 io:
-  raw_dir: data/raw_subset
+  raw_dir: data/raw
   interim_dir: data/interim/candidates
   data_out: data/processed/data/events_data.csv
   label_out: data/processed/labels/events_labels.csv

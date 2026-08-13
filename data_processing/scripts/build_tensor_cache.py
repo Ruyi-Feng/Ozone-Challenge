@@ -41,6 +41,7 @@ except ImportError:
 # ── config ────────────────────────────────────────────────────────────────
 
 TASKS = [
+    # ── intersection only ──
     {
         "parquet": "data/processed/train_events.parquet",
         "labels": "data/processed/labels/events_labels_train.csv",
@@ -54,6 +55,21 @@ TASKS = [
         "valid": "data/processed/val_events.valid_events",
         "out_prefix": "data/processed/val",
         "name": "val",
+    },
+    # ── highway + intersection combined ──
+    {
+        "parquet": "data/processed/train_combined_events.parquet",
+        "labels": "data/processed/labels/events_labels_combined_train.csv",
+        "valid": "data/processed/train_combined_events.valid_events",
+        "out_prefix": "data/processed/combined_train",
+        "name": "combined_train",
+    },
+    {
+        "parquet": "data/processed/val_combined_events.parquet",
+        "labels": "data/processed/labels/events_labels_combined_val.csv",
+        "valid": "data/processed/val_combined_events.valid_events",
+        "out_prefix": "data/processed/combined_val",
+        "name": "combined_val",
     },
 ]
 

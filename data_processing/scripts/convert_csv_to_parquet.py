@@ -20,6 +20,7 @@ import pyarrow.parquet as pq
 CHUNKSIZE = 2_000_000  # rows per pandas chunk
 
 FILES: list[dict[str, str]] = [
+    # ── intersection only ──
     {
         "csv": "data/processed/data/events_data_train.csv",
         "out": "data/processed/train_events.parquet",
@@ -27,6 +28,15 @@ FILES: list[dict[str, str]] = [
     {
         "csv": "data/processed/data/events_data_val.csv",
         "out": "data/processed/val_events.parquet",
+    },
+    # ── highway + intersection combined ──
+    {
+        "csv": "data/processed/data/events_data_combined_train.csv",
+        "out": "data/processed/train_combined_events.parquet",
+    },
+    {
+        "csv": "data/processed/data/events_data_combined_val.csv",
+        "out": "data/processed/val_combined_events.parquet",
     },
 ]
 

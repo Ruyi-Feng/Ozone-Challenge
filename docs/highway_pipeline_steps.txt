@@ -1,0 +1,83 @@
+============================================================
+快速路数据集 Pipeline 执行步骤
+============================================================
+
+前置：确保 Ozone-NGSIM-highD 数据集已上传到服务器
+      /mnt/data/fengruyi/Ozone-NGSIM-highD/
+
+环境：
+  conda deactivate
+  source ~/ozone_venv/bin/activate
+  cd /mnt/data/fengruyi/Ozone-Challenge
+
+============================================================
+Step 1: 数据预处理（降采样 + 复制）
+============================================================
+python data_processing/scripts/downsample_highway.py \
+    --src /mnt/data/fengruyi/Ozone-NGSIM-highD \
+    --out data/raw_highway
+
+产出: data/raw_highway/
+  NGSIM_I80_0400-0415.csv  NGSIM_I80_0500-0515.csv  NGSIM_I80_0515-0530.csv
+  NGSIM_US101_0750am-0805am.csv  NGSIM_US101_0805am-0820am.csv  NGSIM_US101_0820am-0835am.csv
+  highD_01.csv ... highD_60.csv
+
+============================================================
+Step 2: 跑 highway pipeline（后台）
+============================================================
+nohup python data_processing/scripts/run_pipeline.py \
+    --config configs/data_processing_highway.yaml > pipeline_highway.log 2>&1 &
+
+# 查看进度
+tail -f pipeline_highway.log
+tail -100 pipeline_highway.log
+grep -E "done|Error|→|events" pipeline_highway.log
+
+产出:
+  data/processed/data/events_data_highway_train.csv / _val.csv
+  data/processed/labels/events_labels_highway_train.csv / _val.csv
+  data/processed/labels/events_future_traj_highway_train.csv / _val.csv
+
+============================================================
+Step 3: 合并 highway + 交叉口事件
+============================================================
+python data_processing/scripts/merge_highway_intersection.py
+
+产出:
+  data/processed/data/events_data_combined_train.csv / _val.csv
+  data/processed/labels/events_labels_combined_train.csv / _val.csv
+  data/processed/labels/events_future_traj_combined_train.csv / _val.csv
+
+============================================================
+Step 4: 转换 Parquet + 构建 tensor cache
+============================================================
+python data_processing/scripts/convert_csv_to_parquet.py
+python data_processing/scripts/build_tensor_cache.py
+
+产出:
+  data/processed/train_combined_events.parquet / val_combined_events.parquet
+  data/processed/combined_train_x.npy / _mask.npy / _y.npy / _target.npy / _eid.npy
+  data/processed/combined_val_x.npy / _mask.npy / _y.npy / _target.npy / _eid.npy
+
+============================================================
+Step 5: 训练合并模型（后台）
+============================================================
+nohup python -m model_baseline.scripts.run_train \
+    --config configs/model_combined.yaml > train_combined.log 2>&1 &
+
+# 查看进度
+tail -f train_combined.log
+grep -E "epoch|loss|f1|best" train_combined.log
+
+============================================================
+可选: 对 highway 产出做后处理 1:1 双向 rebalance
+============================================================
+python data_processing/scripts/rebalance_csv.py \
+    --labels data/processed/labels/events_labels_highway_train.csv \
+    --data   data/processed/data/events_data_highway_train.csv \
+    --config configs/data_processing_highway.yaml
+
+python data_processing/scripts/rebalance_csv.py \
+    --labels data/processed/labels/events_labels_highway_val.csv \
+    --data   data/processed/data/events_data_highway_val.csv \
+    --config configs/data_processing_highway.yaml

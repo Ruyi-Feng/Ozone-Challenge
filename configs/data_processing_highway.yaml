@@ -1,0 +1,36 @@
+# Highway data processing pipeline config.
+# Same conflict detection / neighbor / rebalance settings as the intersection
+# pipeline, but reads from data/raw_highway/ and writes highway-specific outputs.
+
+time:
+  history_sec: 8.0
+  future_sec: 3.0
+  fps: 10.0
+  conflict_ttc_threshold: 1.5
+
+neighbor:
+  max_distance_m: 200.0
+  slots:
+    - front
+    - rear
+    - left_front
+    - left_rear
+    - right_front
+    - right_rear
+
+io:
+  raw_dir: data/raw_highway
+  interim_dir: data/interim/candidates
+  data_out: data/processed/data/events_data_highway.csv
+  label_out: data/processed/labels/events_labels_highway.csv
+  future_traj_out: data/processed/labels/events_future_traj_highway.csv
+
+split:
+  train_val_ratio: 0.8
+
+rebalance:
+  enabled: true
+  target_ratio: 1.0
+  balance_conflict_types: false
+  per_scene: true
+  seed: 42
