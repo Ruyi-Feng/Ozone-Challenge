@@ -37,8 +37,13 @@ LAT2M = 110540.0        # meters per degree latitude
 LON2M = 111320.0        # meters per degree longitude at equator
 
 KEEP_COLUMNS = [
-    "frameNum", "carId", "carCenterXm", "carCenterYm",
-    "heading", "speed", "objClass", "laneId",
+    "frameNum", "carId", "laneId",
+    "carCenterXm", "carCenterYm",
+    "boundingBox1Xm", "boundingBox1Ym",
+    "boundingBox2Xm", "boundingBox2Ym",
+    "boundingBox3Xm", "boundingBox3Ym",
+    "boundingBox4Xm", "boundingBox4Ym",
+    "heading", "speed", "objClass",
 ]
 
 
@@ -53,12 +58,15 @@ def convert_file(src: Path, dst: Path) -> None:
         "laneNumber": "laneId",
     })
 
-    # 2. GPS -> local meters (equirectangular projection)
+    # 2. GPS -> local meters (equirectangular projection), center + OBB corners
     lat0 = float(df["carCenterLat"].iloc[0])
     lon0 = float(df["carCenterLon"].iloc[0])
     cos_lat = math.cos(math.radians(lat0))
     df["carCenterXm"] = (df["carCenterLon"] - lon0) * LON2M * cos_lat
     df["carCenterYm"] = (df["carCenterLat"] - lat0) * LAT2M
+    for i in range(1, 5):
+        df[f"boundingBox{i}Xm"] = (df[f"boundingBox{i}Lon"] - lon0) * LON2M * cos_lat
+        df[f"boundingBox{i}Ym"] = (df[f"boundingBox{i}Lat"] - lat0) * LAT2M
 
     # 3. sort by car + frame, derive heading/speed over a smoothed window
     df = df.sort_values(["carId", "frameNum"], kind="mergesort").reset_index(drop=True)

@@ -124,8 +124,8 @@ def main() -> None:
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path("data/raw_highway"),
-        help="Output directory (default: data/raw_highway)",
+        default=Path("data/raw"),
+        help="Output directory (default: data/raw)",
     )
     args = parser.parse_args()
 
