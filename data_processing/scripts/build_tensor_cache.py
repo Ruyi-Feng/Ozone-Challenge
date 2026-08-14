@@ -41,7 +41,7 @@ except ImportError:
 # ── config ────────────────────────────────────────────────────────────────
 
 TASKS = [
-    # ── intersection only ──
+    # ── train/val (merged intersection + highway) ──
     {
         "parquet": "data/processed/train_events.parquet",
         "labels": "data/processed/labels/events_labels_train.csv",
@@ -56,20 +56,20 @@ TASKS = [
         "out_prefix": "data/processed/val",
         "name": "val",
     },
-    # ── highway + intersection combined ──
+    # ── test (10% normal) + held-out test ──
     {
-        "parquet": "data/processed/train_combined_events.parquet",
-        "labels": "data/processed/labels/events_labels_combined_train.csv",
-        "valid": "data/processed/train_combined_events.valid_events",
-        "out_prefix": "data/processed/combined_train",
-        "name": "combined_train",
+        "parquet": "data/processed/test_events.parquet",
+        "labels": "data/processed/labels/events_labels_test.csv",
+        "valid": "data/processed/test_events.valid_events",
+        "out_prefix": "data/processed/test",
+        "name": "test",
     },
     {
-        "parquet": "data/processed/val_combined_events.parquet",
-        "labels": "data/processed/labels/events_labels_combined_val.csv",
-        "valid": "data/processed/val_combined_events.valid_events",
-        "out_prefix": "data/processed/combined_val",
-        "name": "combined_val",
+        "parquet": "data/processed/test_heldout_events.parquet",
+        "labels": "data/processed/labels/events_labels_heldout_test.csv",
+        "valid": "data/processed/test_heldout_events.valid_events",
+        "out_prefix": "data/processed/heldout_test",
+        "name": "heldout_test",
     },
 ]
 

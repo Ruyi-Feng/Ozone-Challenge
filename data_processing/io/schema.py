@@ -148,7 +148,9 @@ class ProcessingConfig:
     conflict_ttc_threshold: float = 3.0  # 2D_TTC below this → conflict
     max_distance_m: float = 200.0
     neighbor_slots: tuple[str, ...] = NEIGHBOR_SLOTS
-    train_val_split_ratio: float | None = None  # None → no split; 0.8 → 80/20 train/val
+    train_val_test_ratio: tuple[float, float, float] | None = None  # (0.8, 0.1, 0.1) → 80/10/10
+    test_only: bool = False  # True → all events exported as test (held-out locations)
+    event_id_offset: int = 0  # base offset for Event_id (held-out runs use a large offset)
     raw_dir: str = "data/raw"
     interim_dir: str = "data/interim/candidates"
     data_out: str = "data/processed/data/events_data.csv"

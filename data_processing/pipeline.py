@@ -86,22 +86,43 @@ def run_export_stage(
     return export_events(events, cfg)
 
 
-def _determine_train_egos(
+def _determine_split_egos(
     windows: List[WindowedEventCandidate],
-    train_ratio: float,
+    ratio: Tuple[float, float, float],
     seed: int = 42,
-) -> Set:
-    """Pre-compute which ego_ids belong to the training set.
+) -> Tuple[Set, Set, Set]:
+    """Assign ego_ids to train/val/test, stratified per scene.
 
-    Mirrors ``split_by_ego`` logic but operates on lightweight window
-    objects so the split can be determined before Stage 3 materializes
-    any DataFrame-heavy ``TrackedNeighborhoodEvent``.
+    Within each scene (location) the ego_ids are shuffled and split by
+    *ratio* so every location contributes proportionally to each split.
+    This avoids a location-biased split where one scene's traffic pattern
+    (different density / speed) dominates a single split.
+
+    Returns sets of ``(scene_id, ego_id)`` tuples — carId is only unique
+    within a scene, so the pair is the correct ego key.
     """
-    ego_ids = sorted({w.ego_id for w in windows})
+    train_ratio, val_ratio, _ = ratio
+    scene_egos: dict = {}
+    for w in windows:
+        scene_egos.setdefault(w.scene_id, set()).add(w.ego_id)
+
     rng = random.Random(seed)
-    rng.shuffle(ego_ids)
-    n_train = max(1, int(len(ego_ids) * train_ratio))
-    return set(ego_ids[:n_train])
+    train_keys: Set = set()
+    val_keys: Set = set()
+    test_keys: Set = set()
+    for scene_id, ego_ids in scene_egos.items():
+        ego_list = sorted(ego_ids)
+        rng.shuffle(ego_list)
+        n = len(ego_list)
+        n_train = int(n * train_ratio)
+        n_val = int(n * val_ratio)
+        if n > 0 and n_train == 0:
+            n_train = 1
+        n_val = min(n_val, n - n_train)
+        train_keys.update((scene_id, e) for e in ego_list[:n_train])
+        val_keys.update((scene_id, e) for e in ego_list[n_train:n_train + n_val])
+        test_keys.update((scene_id, e) for e in ego_list[n_train + n_val:])
+    return train_keys, val_keys, test_keys
 
 
 def process_raw_dataframe(
@@ -156,20 +177,24 @@ def process_raw_dataframe(
     neighbor_cache = _precompute_frame_neighbors(frame_index, cfg)
 
     CHUNK_SIZE = 5000
-    ratio = cfg.train_val_split_ratio
-    split_mode = ratio is not None and 0.0 < ratio < 1.0
+    test_only = cfg.test_only
+    ratio = cfg.train_val_test_ratio
+    split_mode = ratio is not None and not test_only
+    next_id = cfg.event_id_offset
 
-    if split_mode:
-        train_egos = _determine_train_egos(windows, ratio)
-        write_csv_headers_split(cfg)
-        train_id = 0
-        val_id = 0
+    if test_only:
+        write_csv_headers_split(cfg, ("test",))
+        n_chunks = (len(windows) + CHUNK_SIZE - 1) // CHUNK_SIZE
+        print(f"  Stage 3+4: {len(windows)} events in "
+              f"{n_chunks} chunks (test-only) …")
+    elif split_mode:
+        train_egos, val_egos, test_egos = _determine_split_egos(windows, ratio)
+        write_csv_headers_split(cfg, ("train", "val", "test"))
         n_chunks = (len(windows) + CHUNK_SIZE - 1) // CHUNK_SIZE
         print(f"  Stage 3+4: {len(windows)} events in "
               f"{n_chunks} chunks (split mode) …")
     else:
         write_csv_headers(cfg)
-        next_id = 0
         n_chunks = (len(windows) + CHUNK_SIZE - 1) // CHUNK_SIZE
         print(f"  Stage 3+4: {len(windows)} events in "
               f"{n_chunks} chunks …")
@@ -184,22 +209,41 @@ def process_raw_dataframe(
         )
         total_tracked += len(tracked)
 
-        if split_mode:
-            train_evts = [e for e in tracked if e.window.ego_id in train_egos]
-            val_evts = [e for e in tracked if e.window.ego_id not in train_egos]
-            train_id = export_chunk(
+        if test_only:
+            next_id = export_chunk(
+                tracked, cfg,
+                suffix_path(cfg.data_out, "test"),
+                suffix_path(cfg.label_out, "test"),
+                suffix_path(cfg.future_traj_out, "test"),
+                start_id=next_id,
+            )
+        elif split_mode:
+            train_evts = [e for e in tracked
+                          if (e.window.scene_id, e.window.ego_id) in train_egos]
+            val_evts = [e for e in tracked
+                        if (e.window.scene_id, e.window.ego_id) in val_egos]
+            test_evts = [e for e in tracked
+                         if (e.window.scene_id, e.window.ego_id) in test_egos]
+            next_id = export_chunk(
                 train_evts, cfg,
                 suffix_path(cfg.data_out, "train"),
                 suffix_path(cfg.label_out, "train"),
                 suffix_path(cfg.future_traj_out, "train"),
-                start_id=train_id,
+                start_id=next_id,
             )
-            val_id = export_chunk(
+            next_id = export_chunk(
                 val_evts, cfg,
                 suffix_path(cfg.data_out, "val"),
                 suffix_path(cfg.label_out, "val"),
                 suffix_path(cfg.future_traj_out, "val"),
-                start_id=val_id,
+                start_id=next_id,
+            )
+            next_id = export_chunk(
+                test_evts, cfg,
+                suffix_path(cfg.data_out, "test"),
+                suffix_path(cfg.label_out, "test"),
+                suffix_path(cfg.future_traj_out, "test"),
+                start_id=next_id,
             )
         else:
             next_id = export_chunk(
@@ -213,14 +257,19 @@ def process_raw_dataframe(
 
     print(f"  → {total_tracked} tracked events, done")
 
+    if test_only:
+        return (
+            suffix_path(cfg.data_out, "test"),
+            suffix_path(cfg.label_out, "test"),
+            suffix_path(cfg.future_traj_out, "test"),
+        )
     if split_mode:
         return (
             suffix_path(cfg.data_out, "train"),
             suffix_path(cfg.label_out, "train"),
             suffix_path(cfg.future_traj_out, "train"),
         )
-    else:
-        return cfg.data_out, cfg.label_out, cfg.future_traj_out
+    return cfg.data_out, cfg.label_out, cfg.future_traj_out
 
 
 def process_raw_file(

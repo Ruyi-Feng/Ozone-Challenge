@@ -21,7 +21,8 @@ def load_config(path: Union[str, Path]) -> ProcessingConfig:
     io_cfg = raw.get("io", {})
 
     split_cfg = raw.get("split", {})
-    train_val_ratio = split_cfg.get("train_val_ratio", None)
+    train_val_test_ratio = split_cfg.get("train_val_test_ratio", None)
+    test_only = split_cfg.get("test_only", False)
 
     rebalance_cfg = raw.get("rebalance", {})
 
@@ -39,7 +40,12 @@ def load_config(path: Union[str, Path]) -> ProcessingConfig:
                 list(ProcessingConfig.neighbor_slots),
             )
         ),
-        train_val_split_ratio=float(train_val_ratio) if train_val_ratio is not None else None,
+        train_val_test_ratio=(
+            tuple(float(x) for x in train_val_test_ratio)
+            if train_val_test_ratio is not None else None
+        ),
+        test_only=bool(test_only),
+        event_id_offset=int(io_cfg.get("event_id_offset", 0)),
         raw_dir=str(io_cfg.get("raw_dir", "data/raw")),
         interim_dir=str(io_cfg.get("interim_dir", "data/interim/candidates")),
         data_out=str(io_cfg.get("data_out", "data/processed/data/events_data.csv")),
