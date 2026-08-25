@@ -16,6 +16,8 @@ _DATASET_REGISTRY: dict[str, type] = {
     "baseline": BaselineConflictDataset,
     "baseline_binary": BinaryBaselineDataset,
     "transformer": BaselineConflictDataset,
+    "transformer_causal": BaselineConflictDataset,
+    "transformer_cross_agent": BaselineConflictDataset,
 }
 
 

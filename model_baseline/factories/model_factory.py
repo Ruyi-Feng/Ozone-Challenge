@@ -9,12 +9,18 @@ from typing import Any
 
 from model_baseline.config import ModelConfig
 from model_baseline.models.baseline import BaselineConflictModel
+from model_baseline.models.cross_agent_transformer import (
+    CausalTemporalTransformerConflictModel,
+    CrossAgentTransformerConflictModel,
+)
 from model_baseline.models.transformer import TransformerConflictModel
 
 # Registry: model_name → Model class
 _MODEL_REGISTRY: dict[str, type] = {
     "baseline": BaselineConflictModel,
     "transformer": TransformerConflictModel,
+    "transformer_causal": CausalTemporalTransformerConflictModel,
+    "transformer_cross_agent": CrossAgentTransformerConflictModel,
 }
 
 

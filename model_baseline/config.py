@@ -25,6 +25,9 @@ class ModelConfig:
     n_layers: int = 2
     n_heads: int = 4
     dropout: float = 0.1
+    # Cross-agent Transformer-only: layers applied to history-only agent
+    # summaries at the prediction time.
+    cross_layers: int = 1
 
 
 @dataclass
@@ -35,6 +38,12 @@ class DataPaths:
     label_val: str = "data/processed/labels/events_labels_val.csv"
     future_train: Optional[str] = None
     future_val: Optional[str] = None
+    data_test: Optional[str] = None
+    label_test: Optional[str] = None
+    future_test: Optional[str] = None
+    data_transfer: Optional[str] = None
+    label_transfer: Optional[str] = None
+    future_transfer: Optional[str] = None
 
 
 @dataclass
@@ -69,6 +78,7 @@ class TrainConfig:
     max_epochs: int = 20
     seed: int = 42
     device: str = "cpu"
+    checkpoint_dir: str = "checkpoints"
     masking: MaskingConfig = field(default_factory=MaskingConfig)
 
 
@@ -134,6 +144,7 @@ def load_config(path: str | Path) -> BaselineRuntimeConfig:
             n_layers=int(m.get("n_layers", 2)),
             n_heads=int(m.get("n_heads", 4)),
             dropout=float(m.get("dropout", 0.1)),
+            cross_layers=int(m.get("cross_layers", 1)),
         ),
         data=DataPaths(
             data_train=d.get("data_train", DataPaths.data_train),
@@ -142,6 +153,12 @@ def load_config(path: str | Path) -> BaselineRuntimeConfig:
             label_val=d.get("label_val", DataPaths.label_val),
             future_train=d.get("future_train"),
             future_val=d.get("future_val"),
+            data_test=d.get("data_test"),
+            label_test=d.get("label_test"),
+            future_test=d.get("future_test"),
+            data_transfer=d.get("data_transfer"),
+            label_transfer=d.get("label_transfer"),
+            future_transfer=d.get("future_transfer"),
         ),
         train=TrainConfig(
             batch_size=int(t.get("batch_size", 32)),
@@ -150,6 +167,7 @@ def load_config(path: str | Path) -> BaselineRuntimeConfig:
             max_epochs=int(t.get("max_epochs", 20)),
             seed=int(t.get("seed", 42)),
             device=str(t.get("device", "cpu")),
+            checkpoint_dir=str(t.get("checkpoint_dir", "checkpoints")),
             masking=_load_masking(t.get("masking", {}) or {}),
         ),
         eval=EvalConfig(

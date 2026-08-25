@@ -7,6 +7,7 @@ Flow:
 
 from __future__ import annotations
 
+import json
 import random
 from dataclasses import asdict
 from pathlib import Path
@@ -106,12 +107,13 @@ def _disable_nested_tensor(model: Any) -> None:
     reproducible masked values.  Only called in the masked regime; the
     original training path is left untouched.
     """
-    enc = getattr(model, "encoder", None)
-    if enc is None:
-        return
-    for attr in ("enable_nested_tensor", "use_nested_tensor"):
-        if hasattr(enc, attr):
-            setattr(enc, attr, False)
+    for name in ("encoder", "agent_encoder"):
+        enc = getattr(model, name, None)
+        if enc is None:
+            continue
+        for attr in ("enable_nested_tensor", "use_nested_tensor"):
+            if hasattr(enc, attr):
+                setattr(enc, attr, False)
 
 
 def _masked_forward(
@@ -281,6 +283,8 @@ def run_train(cfg: BaselineRuntimeConfig) -> None:
     random.seed(cfg.train.seed)
     np.random.seed(cfg.train.seed)
     torch.manual_seed(cfg.train.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(cfg.train.seed)
 
     device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
 
@@ -324,6 +328,9 @@ def run_train(cfg: BaselineRuntimeConfig) -> None:
 
     # --- Loop ---
     best_val_loss = float("inf")
+    history: list[dict[str, Any]] = []
+    ckpt_path = Path(cfg.train.checkpoint_dir)
+    ckpt_path.mkdir(parents=True, exist_ok=True)
     for epoch in range(1, cfg.train.max_epochs + 1):
         train_metrics = train_one_epoch(
             model, train_loader, optimizer, device, mask_sampler=mask_sampler
@@ -353,6 +360,16 @@ def run_train(cfg: BaselineRuntimeConfig) -> None:
             masked_val = None
             select_loss = val_metrics["loss"]
 
+        history.append(
+            {
+                "epoch": epoch,
+                "train": train_metrics,
+                "val": val_metrics,
+                "masked_val": masked_val,
+                "select_loss": select_loss,
+            }
+        )
+
         line = (
             f"Epoch {epoch:3d}/{cfg.train.max_epochs} | "
             f"train loss={train_metrics['loss']:.4f} "
@@ -371,8 +388,6 @@ def run_train(cfg: BaselineRuntimeConfig) -> None:
         # Save best
         if select_loss < best_val_loss:
             best_val_loss = select_loss
-            ckpt_path = Path("checkpoints")
-            ckpt_path.mkdir(exist_ok=True)
             ckpt_file = ckpt_path / checkpoint_filename(cfg.model)
             torch.save(
                 {
@@ -383,6 +398,7 @@ def run_train(cfg: BaselineRuntimeConfig) -> None:
                     "select_loss": select_loss,
                     "config": cfg,
                     "tag": getattr(cfg.model, "tag", ""),
+                    "history": history,
                     # attribution driver asserts on this tag: only checkpoints
                     # trained under the masked regime yield a well-defined v(S)
                     "train_regime": {
@@ -396,6 +412,13 @@ def run_train(cfg: BaselineRuntimeConfig) -> None:
             print(f"  → saved checkpoint {ckpt_file} "
                   f"(select_loss={best_val_loss:.4f})")
 
+    history_name = (
+        f"{getattr(cfg.model, 'tag', '') or cfg.model.name}_training_history.json"
+    )
+    (ckpt_path / history_name).write_text(
+        json.dumps(history, indent=2),
+        encoding="utf-8",
+    )
     print(f"Training finished. Best selection loss: {best_val_loss:.4f}")
 
 
