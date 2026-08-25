@@ -24,6 +24,7 @@ def load_config(path: Union[str, Path]) -> ProcessingConfig:
     train_val_ratio = split_cfg.get("train_val_ratio", None)
 
     rebalance_cfg = raw.get("rebalance", {})
+    sample_cfg = raw.get("sample", {})
     pilot_cfg = raw.get("pilot", {})
 
     return ProcessingConfig(
@@ -63,6 +64,10 @@ def load_config(path: Union[str, Path]) -> ProcessingConfig:
         rebalance_seed=int(rebalance_cfg.get("seed", 42)),
         max_events_per_class_per_scene=int(
             pilot_cfg.get("max_events_per_class_per_scene", 0)
+        ),
+        min_t0_gap_sec=float(sample_cfg.get("min_t0_gap_sec", 0.0)),
+        max_events_per_ego_per_class=int(
+            sample_cfg.get("max_events_per_ego_per_class", 0)
         ),
     )
 

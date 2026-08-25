@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import gc
 import random
+from collections import defaultdict
 from pathlib import Path
-from typing import List, Optional, Set, Tuple, Union
+from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 
 import pandas as pd
 
@@ -40,6 +41,7 @@ from data_processing.io.schema import (
     WindowedEventCandidate,
 )
 from data_processing.io.writers import write_interim_candidates
+from data_processing.utils.progress import tqdm_bar
 
 
 def run_conflict_stage(
@@ -91,17 +93,99 @@ def _determine_train_egos(
     train_ratio: float,
     seed: int = 42,
 ) -> Set:
-    """Pre-compute which ego_ids belong to the training set.
+    """Pre-compute which scene-local ego identities belong to training.
 
     Mirrors ``split_by_ego`` logic but operates on lightweight window
     objects so the split can be determined before Stage 3 materializes
     any DataFrame-heavy ``TrackedNeighborhoodEvent``.
+
+    Vehicle ids are only guaranteed to be unique inside one recording.
+    Therefore the split key must include ``scene_id`` when multiple files
+    are processed together.
     """
-    ego_ids = sorted({w.ego_id for w in windows})
+    ego_ids = sorted({(w.scene_id, w.ego_id) for w in windows})
     rng = random.Random(seed)
     rng.shuffle(ego_ids)
     n_train = max(1, int(len(ego_ids) * train_ratio))
     return set(ego_ids[:n_train])
+
+
+def _thin_windows_by_ego(
+    windows: List[WindowedEventCandidate],
+    *,
+    min_t0_gap_sec: float,
+    max_per_ego_per_class: int,
+    fps: float,
+    seed: int,
+) -> List[WindowedEventCandidate]:
+    """Drop overlapping same-ego windows; do not unique-ify neighbor cars.
+
+    A vehicle appearing as someone else's neighbor is a different training
+    sample (different ego, t0, and relative features). The waste is the
+    same ego emitting many near-identical 8s windows.
+    """
+    if min_t0_gap_sec <= 0 and max_per_ego_per_class <= 0:
+        return windows
+
+    min_gap_frames = max(0.0, float(min_t0_gap_sec) * float(fps))
+    groups: dict[tuple, list[WindowedEventCandidate]] = {}
+    for window in windows:
+        groups.setdefault(
+            (window.scene_id, window.ego_id, window.is_conflict), []
+        ).append(window)
+
+    selected: list[WindowedEventCandidate] = []
+    for key, group in sorted(groups.items()):
+        rng = random.Random(f"{seed}:thin:{key[0]}:{key[1]}:{int(key[2])}")
+        order = list(group)
+        rng.shuffle(order)
+        kept: list[WindowedEventCandidate] = []
+        for window in order:
+            if min_gap_frames > 0 and any(
+                abs(window.t0 - other.t0) < min_gap_frames for other in kept
+            ):
+                continue
+            kept.append(window)
+            if max_per_ego_per_class > 0 and len(kept) >= max_per_ego_per_class:
+                break
+        selected.extend(kept)
+
+    selected.sort(key=lambda w: (w.scene_id, w.t0, w.ego_id))
+    print(
+        f"  ego-window sample: {len(windows)} → {len(selected)} "
+        f"(min_t0_gap={min_t0_gap_sec}s, "
+        f"max_per_ego_class={max_per_ego_per_class or 'off'})"
+    )
+    return selected
+
+
+def _cap_windows_for_pilot(
+    windows: List[WindowedEventCandidate],
+    max_per_class_per_scene: int,
+    seed: int,
+) -> List[WindowedEventCandidate]:
+    """Deterministically cap validated events for a lightweight pilot run."""
+    if max_per_class_per_scene <= 0:
+        return windows
+
+    groups: dict[tuple[str, bool], list[WindowedEventCandidate]] = {}
+    for window in windows:
+        groups.setdefault((window.scene_id, window.is_conflict), []).append(window)
+
+    selected: list[WindowedEventCandidate] = []
+    for (scene_id, is_conflict), group in sorted(groups.items()):
+        if len(group) <= max_per_class_per_scene:
+            selected.extend(group)
+            continue
+        rng = random.Random(f"{seed}:{scene_id}:{int(is_conflict)}")
+        selected.extend(rng.sample(group, max_per_class_per_scene))
+
+    selected.sort(key=lambda w: (w.scene_id, w.t0, w.ego_id))
+    print(
+        f"  pilot cap: {len(windows)} → {len(selected)} windows "
+        f"(max {max_per_class_per_scene}/class/scene)"
+    )
+    return selected
 
 
 def process_raw_dataframe(
@@ -110,11 +194,15 @@ def process_raw_dataframe(
     *,
     dump_interim: bool = False,
     interim_name: str = "candidates.csv",
-) -> Tuple[str, str, str]:
+    split_assigner: Callable[[List[WindowedEventCandidate]], None] | None = None,
+    split_counters: Dict[str, int] | None = None,
+    init_outputs: bool = True,
+) -> Tuple[str, str, str] | Dict[str, int]:
     """
     Run full pipeline on an in-memory raw dataframe.
 
-    Returns (data_path, label_path, future_traj_path).
+    Returns (data_path, label_path, future_traj_path) for the legacy train/val
+    path, or the mutated *split_counters* when *split_assigner* is provided.
     """
     print(f"Pipeline start: {len(raw_df)} rows, "
           f"history={cfg.history_sec}s, future={cfg.future_sec}s")
@@ -150,32 +238,100 @@ def process_raw_dataframe(
     print("  Stage 2/4: window validation …")
     windows = run_window_stage(raw_df, candidates, cfg, car_index=car_index)
     print(f"  → {len(windows)} windowed events")
+    windows = _thin_windows_by_ego(
+        windows,
+        min_t0_gap_sec=cfg.min_t0_gap_sec,
+        max_per_ego_per_class=cfg.max_events_per_ego_per_class,
+        fps=cfg.fps,
+        seed=cfg.rebalance_seed,
+    )
+    windows = _cap_windows_for_pilot(
+        windows,
+        cfg.max_events_per_class_per_scene,
+        cfg.rebalance_seed,
+    )
 
     # Pre-compute neighbor cache once for all chunks
     print("  precomputing frame-neighbor cache …")
     neighbor_cache = _precompute_frame_neighbors(frame_index, cfg)
 
     CHUNK_SIZE = 5000
+
+    if split_assigner is not None:
+        split_assigner(windows)
+        if split_counters is None:
+            split_counters = {}
+        n_chunks = (len(windows) + CHUNK_SIZE - 1) // CHUNK_SIZE
+        print(f"  Stage 3+4: {len(windows)} events in "
+              f"{n_chunks} chunks (named-split mode) …")
+        total_tracked = 0
+        from tqdm import tqdm
+        chunk_starts = range(0, len(windows), CHUNK_SIZE)
+        if n_chunks > 1:
+            chunk_starts = tqdm(
+                chunk_starts,
+                total=n_chunks,
+                desc="  export chunks",
+                unit="chk",
+                **tqdm_bar(leave=False, position=1),
+            )
+        for i in chunk_starts:
+            chunk = windows[i:i + CHUNK_SIZE]
+            tracked = run_neighbor_stage(
+                raw_df, chunk, cfg,
+                frame_index=frame_index, car_index=car_index,
+                neighbor_cache=neighbor_cache,
+            )
+            total_tracked += len(tracked)
+            grouped: dict[str, list] = defaultdict(list)
+            for event in tracked:
+                split = str(event.window.meta.get("split", "train"))
+                grouped[split].append(event)
+            for split, events in grouped.items():
+                split_counters[split] = export_chunk(
+                    events, cfg,
+                    suffix_path(cfg.data_out, split),
+                    suffix_path(cfg.label_out, split),
+                    suffix_path(cfg.future_traj_out, split),
+                    start_id=split_counters.get(split, 0),
+                )
+            del tracked, chunk
+            gc.collect()
+        print(f"  → {total_tracked} tracked events, done")
+        return split_counters
+
     ratio = cfg.train_val_split_ratio
     split_mode = ratio is not None and 0.0 < ratio < 1.0
 
     if split_mode:
         train_egos = _determine_train_egos(windows, ratio)
-        write_csv_headers_split(cfg)
+        if init_outputs:
+            write_csv_headers_split(cfg)
         train_id = 0
         val_id = 0
         n_chunks = (len(windows) + CHUNK_SIZE - 1) // CHUNK_SIZE
         print(f"  Stage 3+4: {len(windows)} events in "
               f"{n_chunks} chunks (split mode) …")
     else:
-        write_csv_headers(cfg)
+        if init_outputs:
+            write_csv_headers(cfg)
         next_id = 0
         n_chunks = (len(windows) + CHUNK_SIZE - 1) // CHUNK_SIZE
         print(f"  Stage 3+4: {len(windows)} events in "
               f"{n_chunks} chunks …")
 
     total_tracked = 0
-    for i in range(0, len(windows), CHUNK_SIZE):
+    from tqdm import tqdm
+    chunk_starts = range(0, len(windows), CHUNK_SIZE)
+    if n_chunks > 1:
+        chunk_starts = tqdm(
+            chunk_starts,
+            total=n_chunks,
+            desc="  export chunks",
+            unit="chk",
+            **tqdm_bar(leave=False, position=1),
+        )
+    for i in chunk_starts:
         chunk = windows[i:i + CHUNK_SIZE]
         tracked = run_neighbor_stage(
             raw_df, chunk, cfg,
@@ -185,8 +341,14 @@ def process_raw_dataframe(
         total_tracked += len(tracked)
 
         if split_mode:
-            train_evts = [e for e in tracked if e.window.ego_id in train_egos]
-            val_evts = [e for e in tracked if e.window.ego_id not in train_egos]
+            train_evts = [
+                e for e in tracked
+                if (e.window.scene_id, e.window.ego_id) in train_egos
+            ]
+            val_evts = [
+                e for e in tracked
+                if (e.window.scene_id, e.window.ego_id) not in train_egos
+            ]
             train_id = export_chunk(
                 train_evts, cfg,
                 suffix_path(cfg.data_out, "train"),

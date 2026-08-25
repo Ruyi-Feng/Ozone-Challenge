@@ -167,3 +167,9 @@ class ProcessingConfig:
     # Optional pilot-only cap applied after history/future validation.
     # Zero keeps every event (the production/default behaviour).
     max_events_per_class_per_scene: int = 0
+    # Drop near-duplicate windows of the same ego (t0 is in frames).
+    # Zero disables the gap filter.
+    min_t0_gap_sec: float = 0.0
+    # After the gap filter, keep at most this many windows per
+    # (scene, ego, class). Zero disables the per-ego cap.
+    max_events_per_ego_per_class: int = 0
