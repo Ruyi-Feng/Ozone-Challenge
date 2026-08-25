@@ -41,11 +41,41 @@ def _require_torch() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _dataset_kwargs(cfg: BaselineRuntimeConfig) -> dict[str, Any]:
+    max_agents = getattr(cfg.model, "max_agents", None) or getattr(
+        cfg.data, "max_agents", cfg.model.num_agents
+    )
+    return {
+        "num_agents": cfg.model.num_agents,
+        "max_agents": max_agents,
+        "num_features": cfg.model.num_features,
+        "num_frames": cfg.model.num_frames,
+    }
+
+
+def _collate_fn_for(dataset: Any) -> Any:
+    return getattr(dataset, "collate_fn", None)
+
+
+def build_dataloader(
+    dataset: Any, cfg: BaselineRuntimeConfig, *, shuffle: bool
+) -> Any:
+    return DataLoader(
+        dataset,
+        batch_size=cfg.train.batch_size,
+        shuffle=shuffle,
+        num_workers=cfg.train.num_workers,
+        drop_last=False,
+        collate_fn=_collate_fn_for(dataset),
+    )
+
+
 def build_dataloaders(
     cfg: BaselineRuntimeConfig,
 ) -> tuple[Any, Any]:
     """Construct train and validation DataLoaders from config."""
     _require_torch()
+    ds_kwargs = _dataset_kwargs(cfg)
 
     train_ds = build_dataset(
         cfg.model.name,
@@ -53,9 +83,7 @@ def build_dataloaders(
         label_path=cfg.data.label_train,
         split="train",
         future_path=cfg.data.future_train,
-        num_agents=cfg.model.num_agents,
-        num_features=cfg.model.num_features,
-        num_frames=cfg.model.num_frames,
+        **ds_kwargs,
     )
     val_ds = build_dataset(
         cfg.model.name,
@@ -63,26 +91,12 @@ def build_dataloaders(
         label_path=cfg.data.label_val,
         split="val",
         future_path=cfg.data.future_val,
-        num_agents=cfg.model.num_agents,
-        num_features=cfg.model.num_features,
-        num_frames=cfg.model.num_frames,
+        **ds_kwargs,
     )
-
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=cfg.train.batch_size,
-        shuffle=True,
-        num_workers=cfg.train.num_workers,
-        drop_last=False,
+    return (
+        build_dataloader(train_ds, cfg, shuffle=True),
+        build_dataloader(val_ds, cfg, shuffle=False),
     )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=cfg.train.batch_size,
-        shuffle=False,
-        num_workers=cfg.train.num_workers,
-        drop_last=False,
-    )
-    return train_loader, val_loader
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +130,25 @@ def _disable_nested_tensor(model: Any) -> None:
                 setattr(enc, attr, False)
 
 
+def _forward_extras(batch: dict[str, Any], device: "torch.device") -> dict[str, Any]:
+    extras: dict[str, Any] = {}
+    if "role_ids" in batch:
+        extras["role_ids"] = batch["role_ids"].to(device)
+    return extras
+
+
+def _compute_loss(
+    model: Any,
+    outputs: dict[str, "torch.Tensor"],
+    is_conflict: "torch.Tensor",
+    target_idx: "torch.Tensor",
+    agent_mask: Optional["torch.Tensor"] = None,
+) -> dict[str, "torch.Tensor"]:
+    return model.compute_loss(
+        outputs, is_conflict, target_idx, agent_mask=agent_mask
+    )
+
+
 def _masked_forward(
     model: Any,
     batch: dict[str, Any],
@@ -129,6 +162,7 @@ def _masked_forward(
 
     Neither set → the ORIGINAL call signature, byte-identical behaviour.
     """
+    extras = _forward_extras(batch, device)
     if mask_sampler is not None:
         tm_np, cm_np = mask_sampler.sample_batch(
             batch["valid_mask"].numpy(), batch["agent_mask"].numpy()
@@ -138,13 +172,17 @@ def _masked_forward(
             agent_mask=agent_mask,
             time_mask=torch.from_numpy(tm_np).to(device),
             channel_mask=torch.from_numpy(cm_np).to(device),
+            **extras,
         )
     if use_valid_mask:
         return model(
             x,
             agent_mask=agent_mask,
             time_mask=~batch["valid_mask"].to(device),
+            **extras,
         )
+    if extras:
+        return model(x, agent_mask=agent_mask, **extras)
     return model(x, agent_mask=agent_mask)
 
 
@@ -179,7 +217,9 @@ def train_one_epoch(
         outputs = _masked_forward(
             model, batch, x, agent_mask, device, mask_sampler, False
         )
-        loss_dict = model.compute_loss(outputs, is_conflict, target_idx)
+        loss_dict = _compute_loss(
+            model, outputs, is_conflict, target_idx, agent_mask=agent_mask
+        )
 
         optimizer.zero_grad()
         loss_dict["loss"].backward()
@@ -225,6 +265,7 @@ def validate(
     correct_conflict = 0
     correct_target = 0
     n_conflict = 0  # samples where is_conflict == 1 AND target in neighbor slots
+    n_conflict_all = 0
     n = 0
 
     for batch in loader:
@@ -236,7 +277,9 @@ def validate(
         outputs = _masked_forward(
             model, batch, x, agent_mask, device, mask_sampler, use_valid_mask
         )
-        loss_dict = model.compute_loss(outputs, is_conflict, target_idx)
+        loss_dict = _compute_loss(
+            model, outputs, is_conflict, target_idx, agent_mask=agent_mask
+        )
 
         bs = x.size(0)
         total_loss += float(loss_dict["loss"]) * bs
@@ -254,6 +297,7 @@ def validate(
             is_conflict.to(dtype=torch.bool)
             & (target_idx >= 0).to(dtype=torch.bool)
         )
+        n_conflict_all += int(is_conflict.to(dtype=torch.bool).sum().item())
         if conf_mask.any():
             target_pred = outputs["target_logits"][conf_mask].argmax(dim=-1)
             correct_target += int(
@@ -267,6 +311,7 @@ def validate(
         "target_loss": total_target / max(n, 1),
         "conflict_acc": correct_conflict / max(n, 1),
         "target_acc": correct_target / max(n_conflict, 1),
+        "target_coverage": n_conflict / max(n_conflict_all, 1),
     }
 
 

@@ -14,6 +14,9 @@ from model_baseline.models.cross_agent_transformer import (
     CrossAgentTransformerConflictModel,
 )
 from model_baseline.models.transformer import TransformerConflictModel
+from model_baseline.models.variable_cross_agent import (
+    VariableCrossAgentTransformerConflictModel,
+)
 
 # Registry: model_name → Model class
 _MODEL_REGISTRY: dict[str, type] = {
@@ -21,6 +24,7 @@ _MODEL_REGISTRY: dict[str, type] = {
     "transformer": TransformerConflictModel,
     "transformer_causal": CausalTemporalTransformerConflictModel,
     "transformer_cross_agent": CrossAgentTransformerConflictModel,
+    "transformer_cross_agent_variable": VariableCrossAgentTransformerConflictModel,
 }
 
 

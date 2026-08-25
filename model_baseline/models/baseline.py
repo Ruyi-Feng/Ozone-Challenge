@@ -113,6 +113,9 @@ if nn is not None:
             self,
             x: "torch.Tensor",
             agent_mask: Optional["torch.Tensor"] = None,
+            time_mask: Optional["torch.Tensor"] = None,
+            channel_mask: Optional["torch.Tensor"] = None,
+            role_ids: Optional["torch.Tensor"] = None,
         ) -> dict[str, "torch.Tensor"]:
             """
             Parameters
@@ -168,6 +171,7 @@ if nn is not None:
             target_idx: "torch.Tensor",
             *,
             lambda_target: float = 1.0,
+            agent_mask: Optional["torch.Tensor"] = None,
         ) -> dict[str, "torch.Tensor"]:
             """
             Parameters

@@ -28,6 +28,11 @@ class ModelConfig:
     # Cross-agent Transformer-only: layers applied to history-only agent
     # summaries at the prediction time.
     cross_layers: int = 1
+    # Variable-agent models use max_agents as an upper bound (1 <= A <= max).
+    # Fixed-slot models ignore this and keep requiring A == num_agents.
+    max_agents: int | None = None
+    num_roles: int = 7
+    pad_role_id: int = 7
 
 
 @dataclass
@@ -44,6 +49,17 @@ class DataPaths:
     data_transfer: Optional[str] = None
     label_transfer: Optional[str] = None
     future_transfer: Optional[str] = None
+    layout: str = "fixed"  # "fixed" | "ragged"
+    cache_dir: str = ""
+    max_agents: int = 7
+    allowed_roles: tuple[str, ...] = (
+        "front",
+        "rear",
+        "left_front",
+        "left_rear",
+        "right_front",
+        "right_rear",
+    )
 
 
 @dataclass
@@ -145,6 +161,9 @@ def load_config(path: str | Path) -> BaselineRuntimeConfig:
             n_heads=int(m.get("n_heads", 4)),
             dropout=float(m.get("dropout", 0.1)),
             cross_layers=int(m.get("cross_layers", 1)),
+            max_agents=int(m["max_agents"]) if m.get("max_agents") is not None else None,
+            num_roles=int(m.get("num_roles", 7)),
+            pad_role_id=int(m.get("pad_role_id", 7)),
         ),
         data=DataPaths(
             data_train=d.get("data_train", DataPaths.data_train),
@@ -159,6 +178,22 @@ def load_config(path: str | Path) -> BaselineRuntimeConfig:
             data_transfer=d.get("data_transfer"),
             label_transfer=d.get("label_transfer"),
             future_transfer=d.get("future_transfer"),
+            layout=str(d.get("layout", "fixed")),
+            cache_dir=str(d.get("cache_dir", "") or ""),
+            max_agents=int(d.get("max_agents", m.get("max_agents", 7) or 7)),
+            allowed_roles=tuple(
+                d.get(
+                    "allowed_roles",
+                    (
+                        "front",
+                        "rear",
+                        "left_front",
+                        "left_rear",
+                        "right_front",
+                        "right_rear",
+                    ),
+                )
+            ),
         ),
         train=TrainConfig(
             batch_size=int(t.get("batch_size", 32)),

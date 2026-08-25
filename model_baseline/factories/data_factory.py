@@ -9,6 +9,7 @@ from typing import Any
 
 from model_baseline.datasets.baseline import BaselineConflictDataset
 from model_baseline.datasets.binary_baseline import BinaryBaselineDataset
+from model_baseline.datasets.ragged import RaggedBaselineConflictDataset
 
 # Registry: model_name → Dataset class (or builder)
 # transformer shares the same [A,T,F] tensor cache as baseline (I/O contract unchanged)
@@ -18,6 +19,7 @@ _DATASET_REGISTRY: dict[str, type] = {
     "transformer": BaselineConflictDataset,
     "transformer_causal": BaselineConflictDataset,
     "transformer_cross_agent": BaselineConflictDataset,
+    "transformer_cross_agent_variable": RaggedBaselineConflictDataset,
 }
 
 

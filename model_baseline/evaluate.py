@@ -19,7 +19,6 @@ from sklearn.metrics import (
 
 try:
     import torch
-    from torch.utils.data import DataLoader
 except ImportError:
     torch = None  # type: ignore
 
@@ -29,7 +28,7 @@ from model_baseline.config import (
     load_config,
 )
 from model_baseline.factories import build_dataset, build_model
-from model_baseline.train import _disable_nested_tensor
+from model_baseline.train import _compute_loss, _dataset_kwargs, _disable_nested_tensor, build_dataloader
 
 # Neighbor slot → model target index mapping (consistent with baseline.py)
 TARGET_IDX_TO_ROLE: dict[int, str] = {
@@ -144,16 +143,9 @@ def run_eval(
         label_path=label_path,
         split=split,
         future_path=future_path,
-        num_agents=cfg.model.num_agents,
-        num_features=cfg.model.num_features,
-        num_frames=cfg.model.num_frames,
+        **_dataset_kwargs(cfg),
     )
-    loader = DataLoader(
-        ds,
-        batch_size=cfg.train.batch_size,
-        shuffle=False,
-        num_workers=cfg.train.num_workers,
-    )
+    loader = build_dataloader(ds, cfg, shuffle=False)
     print(f"Eval samples: {len(ds)}")
 
     # --- Accumulate predictions ---
@@ -165,24 +157,32 @@ def run_eval(
     all_target_labels: list[int] = []
     target_preds: list[int] = []   # predicted neighbor index
     target_labels: list[int] = []  # ground-truth neighbor index
+    target_roles: list[str] = []
     total_loss = 0.0
     n = 0
+    n_conflict_all = 0
 
     for batch in loader:
         x = batch["x"].to(device)
         agent_mask = batch["agent_mask"].to(device)
         is_conflict = batch["is_conflict"].to(device)
         target_idx = batch["target_idx"].to(device)
+        extras = {}
+        if "role_ids" in batch:
+            extras["role_ids"] = batch["role_ids"].to(device)
 
         if masked_regime:
             outputs = model(
                 x,
                 agent_mask=agent_mask,
                 time_mask=~batch["valid_mask"].to(device),
+                **extras,
             )
         else:
-            outputs = model(x, agent_mask=agent_mask)
-        loss_dict = model.compute_loss(outputs, is_conflict, target_idx)
+            outputs = model(x, agent_mask=agent_mask, **extras)
+        loss_dict = _compute_loss(
+            model, outputs, is_conflict, target_idx, agent_mask=agent_mask
+        )
 
         bs = x.size(0)
         total_loss += float(loss_dict["loss"]) * bs
@@ -200,24 +200,44 @@ def run_eval(
         all_event_ids.extend(int(v) for v in event_batch)
 
         has_neighbor = agent_mask[:, 1:].any(dim=1)
-        batch_target_pred = outputs["target_logits"].argmax(dim=-1)
-        batch_target_pred = torch.where(
-            has_neighbor,
-            batch_target_pred,
-            torch.full_like(batch_target_pred, -1),
-        )
+        if outputs["target_logits"].size(-1) == 0:
+            batch_target_pred = torch.full(
+                (bs,), -1, dtype=torch.long, device=x.device
+            )
+        else:
+            batch_target_pred = outputs["target_logits"].argmax(dim=-1)
+            batch_target_pred = torch.where(
+                has_neighbor,
+                batch_target_pred,
+                torch.full_like(batch_target_pred, -1),
+            )
         all_target_preds.extend(batch_target_pred.cpu().tolist())
         all_target_labels.extend(target_idx.long().cpu().tolist())
 
         # Target prediction (conflict samples only)
+        n_conflict_all += int(is_conflict.to(dtype=torch.bool).sum().item())
         conf_mask = (
             is_conflict.to(dtype=torch.bool)
             & (target_idx >= 0).to(dtype=torch.bool)
         )
         if conf_mask.any():
             t_pred = outputs["target_logits"][conf_mask].argmax(dim=-1)
+            t_lab = target_idx[conf_mask].long()
             target_preds.extend(t_pred.cpu().tolist())
-            target_labels.extend(target_idx[conf_mask].long().cpu().tolist())
+            target_labels.extend(t_lab.cpu().tolist())
+            if "role_ids" in batch:
+                from data_processing.core.variable_agents import ID_TO_ROLE
+
+                role_ids = batch["role_ids"]
+                nbr_roles = role_ids[:, 1:]
+                for idx, lab in zip(conf_mask.nonzero(as_tuple=False).squeeze(-1), t_lab):
+                    rid = int(nbr_roles[int(idx), int(lab)])
+                    target_roles.append(ID_TO_ROLE.get(rid, f"role({rid})"))
+            else:
+                target_roles.extend(
+                    TARGET_IDX_TO_ROLE.get(int(lab), f"unknown({int(lab)})")
+                    for lab in t_lab.cpu().tolist()
+                )
 
     # --- Conflict metrics ---
     labels_arr = np.array(all_labels)
@@ -234,14 +254,15 @@ def run_eval(
         t_labels_arr = np.array(target_labels)
         target_acc = float((t_preds_arr == t_labels_arr).mean())
 
-        for pred, label in zip(target_preds, target_labels):
-            role = TARGET_IDX_TO_ROLE.get(label, f"unknown({label})")
+        for pred, label, role in zip(target_preds, target_labels, target_roles):
             per_role[role]["total"] += 1
             if pred == label:
                 per_role[role]["correct"] += 1
 
     metrics["target_acc"] = target_acc
     metrics["target_samples"] = len(target_labels)
+    metrics["target_coverage"] = len(target_labels) / max(n_conflict_all, 1)
+    metrics["n_conflict"] = n_conflict_all
     if target_labels:
         metrics["target_macro_f1"] = float(
             f1_score(target_labels, target_preds, average="macro")
@@ -269,6 +290,21 @@ def run_eval(
         prediction_df["conflict_target_role"] = prediction_df["event_id"].map(
             metadata["conflict_target_role"].to_dict()
         )
+        conflict_rows = prediction_df[prediction_df["is_conflict"] == 1]
+        if len(conflict_rows) > 0:
+            metrics["target_coverage"] = float(
+                (conflict_rows["target_idx"] >= 0).mean()
+            )
+            coverage_by_role: dict[str, dict[str, float | int]] = {}
+            for role, group in conflict_rows.groupby("conflict_target_role"):
+                hit = int((group["target_idx"] >= 0).sum())
+                tot = int(len(group))
+                coverage_by_role[str(role)] = {
+                    "hit": hit,
+                    "total": tot,
+                    "coverage": hit / max(tot, 1),
+                }
+            metrics["target_coverage_by_role"] = coverage_by_role
 
     scene_ids = prediction_df["scene_id"].astype(str)
     prediction_df["is_transfer"] = scene_ids.str.startswith("UTE_xam")
@@ -350,16 +386,28 @@ def run_eval(
     print()
     print("Target Prediction (conflict partner identification):")
     print(f"  Samples:         {metrics['target_samples']}")
+    print(f"  Coverage:        {metrics.get('target_coverage', 0.0):.4f} "
+          f"({metrics['target_samples']}/{metrics.get('n_conflict', 0)})")
     print(f"  Accuracy:        {metrics['target_acc']:.4f}")
     print(f"  Macro-F1:        {metrics['target_macro_f1']:.4f}")
     if per_role:
-        print("  Per-role:")
-        for role in ["front", "rear", "left_front", "left_rear",
-                     "right_front", "right_rear"]:
+        print("  Per-role accuracy (target-observable):")
+        roles_print = [
+            "front", "rear", "left_front", "left_rear",
+            "right_front", "right_rear",
+        ]
+        for role in roles_print + [r for r in per_role if r not in roles_print]:
             if role in per_role:
                 r = per_role[role]
                 acc = r["correct"] / max(r["total"], 1)
                 print(f"    {role:>12s}: {acc:.3f} ({r['correct']}/{r['total']})")
+    if metrics.get("target_coverage_by_role"):
+        print("  Per-role coverage:")
+        for role, stats in metrics["target_coverage_by_role"].items():
+            print(
+                f"    {str(role):>12s}: {stats['coverage']:.3f} "
+                f"({stats['hit']}/{stats['total']})"
+            )
     if scene_metrics:
         print()
         print("Per-scene conflict F1:")

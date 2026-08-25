@@ -163,6 +163,7 @@ class CrossAgentTransformerConflictModel(CausalTemporalTransformerConflictModel)
         agent_mask: Optional[torch.Tensor] = None,
         time_mask: Optional[torch.Tensor] = None,
         channel_mask: Optional[torch.Tensor] = None,
+        role_ids: Optional[torch.Tensor] = None,
     ) -> dict[str, torch.Tensor]:
         if x.dim() != 4:
             raise ValueError(f"Expected x [B,A,T,F], got shape {tuple(x.shape)}")

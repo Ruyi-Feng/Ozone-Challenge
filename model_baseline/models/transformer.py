@@ -211,6 +211,7 @@ if nn is not None:
             agent_mask: Optional["torch.Tensor"] = None,
             time_mask: Optional["torch.Tensor"] = None,
             channel_mask: Optional["torch.Tensor"] = None,
+            role_ids: Optional["torch.Tensor"] = None,
         ) -> dict[str, "torch.Tensor"]:
             """
             Parameters
@@ -219,12 +220,8 @@ if nn is not None:
             agent_mask : Tensor [B, A] bool/float, or None (= all present)
             time_mask : Tensor [B, A, T] bool, True = blocked frame (optional)
             channel_mask : Tensor [B, A, T, F] bool, True = masked channel (optional)
-
-            Returns
-            -------
-            dict with:
-              conflict_logit : [B]
-              target_logits  : [B, A-1]  (empty slots filled with -inf)
+            role_ids : ignored by the fixed-slot Transformer; accepted so
+                shared training code can pass it unconditionally.
             """
             if x.dim() != 4:
                 raise ValueError(f"Expected x [B,A,T,F], got shape {tuple(x.shape)}")
@@ -267,6 +264,7 @@ if nn is not None:
             target_idx: "torch.Tensor",
             *,
             lambda_target: float = 1.0,
+            agent_mask: Optional["torch.Tensor"] = None,
         ) -> dict[str, "torch.Tensor"]:
             """Same loss as LSTM baseline: conflict BCE + target CE."""
             conflict_logit = outputs["conflict_logit"]
