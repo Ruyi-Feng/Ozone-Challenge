@@ -35,6 +35,7 @@ class ConflictValueFn:
         device: "torch.device | str" = "cpu",
         target: str = "conflict_logit",
         target_idx: Optional[int] = None,
+        role_ids: "torch.Tensor | np.ndarray | None" = None,
     ) -> None:
         if target not in ("conflict_logit", "target_logit"):
             raise ValueError(f"unknown attribution target {target!r}")
@@ -55,6 +56,12 @@ class ConflictValueFn:
         self.valid = torch.as_tensor(
             valid_mask, dtype=torch.bool, device=self.device
         )
+        if role_ids is None:
+            self.role_ids = None
+        else:
+            self.role_ids = torch.as_tensor(
+                role_ids, dtype=torch.long, device=self.device
+            )
         if self.x.dim() != 3:
             raise ValueError(f"x must be [A, T, F], got {tuple(self.x.shape)}")
         self.n_forwards = 0
@@ -69,8 +76,13 @@ class ConflictValueFn:
         x = self.x.unsqueeze(0).expand(B, -1, -1, -1)
         am = self.agent_mask.unsqueeze(0).expand(B, -1)
         tm = (~self.valid).unsqueeze(0).expand(B, -1, -1)
+        extras = {}
+        if self.role_ids is not None:
+            extras["role_ids"] = self.role_ids.unsqueeze(0).expand(B, -1)
         with torch.no_grad():
-            out = self.model(x, agent_mask=am, time_mask=tm, channel_mask=cm)
+            out = self.model(
+                x, agent_mask=am, time_mask=tm, channel_mask=cm, **extras
+            )
         self.n_forwards += B
         if self.target == "conflict_logit":
             vals = out["conflict_logit"]

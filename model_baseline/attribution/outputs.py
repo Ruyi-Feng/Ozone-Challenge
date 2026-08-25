@@ -29,37 +29,79 @@ def _sigmoid(z: float) -> float:
     return float(1.0 / (1.0 + np.exp(-z)))
 
 
-def aggregate(p: CellPartition, cell_psi: np.ndarray) -> dict[str, Any]:
+def _agent_name(a: int, labels: list[dict[str, Any]] | None) -> str:
+    if labels and 0 <= a < len(labels):
+        item = labels[a]
+        role = item.get("role", "")
+        car_id = item.get("car_id", item.get("carId", -1))
+        try:
+            car_id_i = int(car_id)
+        except (TypeError, ValueError):
+            car_id_i = -1
+        if car_id_i >= 0 and role:
+            local = item.get("local_index", a)
+            return f"{local}:{role}:{car_id_i}"
+        if role:
+            return str(role)
+    return SLOT_NAMES[a] if a < len(SLOT_NAMES) else f"agent{a}"
+
+
+def aggregate(
+    p: CellPartition,
+    cell_psi: np.ndarray,
+    agent_labels: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Sum cell values up the levels: (agent, segment), agent, segment, channel."""
     agent_seg: dict[str, float] = {}
     per_agent: dict[str, float] = {}
     per_segment: dict[str, float] = {}
     per_channel: dict[str, float] = {}
+    per_agent_rows: list[dict[str, Any]] = []
+    agent_psi: dict[int, float] = {}
 
     for cell_id, (a, s, c) in enumerate(p.cells):
         psi = float(cell_psi[cell_id])
-        a_name = SLOT_NAMES[a] if a < len(SLOT_NAMES) else f"agent{a}"
+        a_name = _agent_name(a, agent_labels)
         c_name = CHANNEL_NAMES[c] if c < len(CHANNEL_NAMES) else f"ch{c}"
         agent_seg[f"{a_name}/seg{s}"] = agent_seg.get(f"{a_name}/seg{s}", 0.0) + psi
         per_agent[a_name] = per_agent.get(a_name, 0.0) + psi
+        agent_psi[a] = agent_psi.get(a, 0.0) + psi
         per_segment[f"seg{s}"] = per_segment.get(f"seg{s}", 0.0) + psi
         per_channel[c_name] = per_channel.get(c_name, 0.0) + psi
+
+    for a, psi in sorted(agent_psi.items()):
+        label = (agent_labels[a] if agent_labels and a < len(agent_labels) else {})
+        per_agent_rows.append({
+            "local_agent_index": a,
+            "carId": label.get("car_id", label.get("carId", -1)),
+            "role": label.get("role", _agent_name(a, None)),
+            "agent_shapley": float(psi),
+        })
 
     return {
         "agent_segment": agent_seg,
         "agent": per_agent,
         "segment": per_segment,
         "channel": per_channel,
+        "agent_rows": per_agent_rows,
     }
 
 
-def cell_table(p: CellPartition, res: WinterResult) -> list[dict[str, Any]]:
+def cell_table(
+    p: CellPartition,
+    res: WinterResult,
+    agent_labels: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     rows = []
     for cell_id, (a, s, c) in enumerate(p.cells):
         start, end = p.seg_bounds[s]
+        label = (agent_labels[a] if agent_labels and a < len(agent_labels) else {})
         rows.append({
-            "agent": SLOT_NAMES[a] if a < len(SLOT_NAMES) else f"agent{a}",
+            "agent": _agent_name(a, agent_labels),
             "agent_idx": a,
+            "local_agent_index": a,
+            "carId": label.get("car_id", label.get("carId", -1)),
+            "role": label.get("role", SLOT_NAMES[a] if a < len(SLOT_NAMES) else f"agent{a}"),
             "seg": s,
             "frame_start": int(start),
             "frame_end": int(end),
@@ -71,8 +113,13 @@ def cell_table(p: CellPartition, res: WinterResult) -> list[dict[str, Any]]:
     return rows
 
 
-def readout_result(p: CellPartition, res: WinterResult) -> dict[str, Any]:
+def readout_result(
+    p: CellPartition,
+    res: WinterResult,
+    agent_labels: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """JSON-serializable result of one readout on one event."""
+    aggs = aggregate(p, res.cell_psi, agent_labels=agent_labels)
     return {
         "v_full": res.v_full,
         "v_empty": res.v_empty,
@@ -84,8 +131,9 @@ def readout_result(p: CellPartition, res: WinterResult) -> dict[str, Any]:
         "n_samples": res.n_samples,
         "n_forwards": res.n_forwards,
         "n_cache_hits": res.n_cache_hits,
-        "aggregations": aggregate(p, res.cell_psi),
-        "cells": cell_table(p, res),
+        "aggregations": aggs,
+        "agent_shapley": aggs.get("agent_rows", []),
+        "cells": cell_table(p, res, agent_labels=agent_labels),
     }
 
 
@@ -95,14 +143,18 @@ def event_result(
     p: CellPartition,
     readouts: dict[str, WinterResult],
     extra: dict[str, Any] | None = None,
+    agent_labels: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
         "event": meta,
         "game": game_config,
         "seg_bounds": [[int(s), int(e)] for s, e in p.seg_bounds],
         "n_cells": p.n_cells,
+        "n_players": len(p.agents),
+        "agents": agent_labels or [],
         "readouts": {
-            name: readout_result(p, res) for name, res in readouts.items()
+            name: readout_result(p, res, agent_labels=agent_labels)
+            for name, res in readouts.items()
         },
     }
     if extra:

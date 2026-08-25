@@ -66,6 +66,8 @@ class OutputConfig:
 class AttributionConfig:
     checkpoint: str = "checkpoints/best_model.pt"
     data_prefix: str = "data/processed/val"
+    label_path: str = ""
+    layout: str = "auto"  # auto | ragged | binary
     device: str = "cuda"
     # v(S) is only well-defined on a checkpoint trained under the masked
     # regime; overriding this yields OOD masked inputs — case studies only.
@@ -98,6 +100,8 @@ def load_attribution_config(path: str | Path) -> AttributionConfig:
     return AttributionConfig(
         checkpoint=str(raw.get("checkpoint", "checkpoints/best_model.pt")),
         data_prefix=str(raw.get("data_prefix", "data/processed/val")),
+        label_path=str(raw.get("label_path", "") or ""),
+        layout=str(raw.get("layout", "auto") or "auto"),
         device=str(raw.get("device", "cuda")),
         allow_unmasked_checkpoint=bool(raw.get("allow_unmasked_checkpoint", False)),
         selection=SelectionConfig(

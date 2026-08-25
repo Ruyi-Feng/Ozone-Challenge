@@ -34,8 +34,10 @@ from model_baseline.attribution.outputs import (
 from model_baseline.attribution.values import ConflictValueFn
 from model_baseline.attribution.winter_mc import exact_shapley, winter_value_nested_mc
 from model_baseline.datasets.binary_baseline import BinaryBaselineDataset
+from model_baseline.datasets.ragged import RaggedBaselineConflictDataset
 from model_baseline.factories import build_model
 from model_baseline.masking import SegmentSpec, build_partition
+from data_processing.core.variable_agents import ID_TO_ROLE
 
 
 def load_frozen_model(
@@ -73,8 +75,48 @@ def load_frozen_model(
     return model, ckpt
 
 
+def _build_attribution_dataset(cfg: AttributionConfig):
+    prefix = cfg.data_prefix
+    ragged_marker = Path(f"{prefix}_event_offsets.npy")
+    layout = str(getattr(cfg, "layout", "auto") or "auto")
+    use_ragged = layout == "ragged" or (
+        layout == "auto" and ragged_marker.exists()
+    )
+    if use_ragged:
+        return RaggedBaselineConflictDataset(
+            data_path=prefix,
+            label_path=str(getattr(cfg, "label_path", "") or ""),
+            split="attr",
+        )
+    return BinaryBaselineDataset(prefix)
+
+
+def _agent_labels(sample: dict[str, Any]) -> list[dict[str, Any]]:
+    agent_mask = sample["agent_mask"].numpy()
+    role_ids = sample.get("role_ids")
+    agent_ids = sample.get("agent_ids")
+    labels = []
+    for a, present in enumerate(agent_mask):
+        if not bool(present):
+            continue
+        if role_ids is not None:
+            rid = int(role_ids[a])
+            role = ID_TO_ROLE.get(rid, SLOT_NAMES[a] if a < len(SLOT_NAMES) else f"agent{a}")
+        else:
+            role = SLOT_NAMES[a] if a < len(SLOT_NAMES) else f"agent{a}"
+        car_id = int(agent_ids[a]) if agent_ids is not None else -1
+        labels.append({
+            "local_index": a,
+            "car_id": car_id,
+            "carId": car_id,
+            "role": role,
+            "role_id": int(role_ids[a]) if role_ids is not None else a,
+        })
+    return labels
+
+
 def select_samples(
-    ds: BinaryBaselineDataset, sel: SelectionConfig
+    ds: Any, sel: SelectionConfig
 ) -> list[int]:
     """Filter dataset indices by the selection config (index-CSV metadata)."""
     picked: list[int] = []
@@ -109,12 +151,11 @@ def run_attribution(cfg: AttributionConfig) -> list[dict[str, Any]]:
         cfg.checkpoint, device, allow_unmasked=cfg.allow_unmasked_checkpoint
     )
 
-    ds = BinaryBaselineDataset(cfg.data_prefix)
+    ds = _build_attribution_dataset(cfg)
     if not ds.has_valid_mask:
         raise RuntimeError(
-            f"{cfg.data_prefix}_valid.bin not found — the attribution game "
-            f"requires per-frame validity. Run build_tensor_cache.py "
-            f"--valid-only, then build_binary_cache.py."
+            f"{cfg.data_prefix} has no per-frame validity mask — the "
+            f"attribution game requires it."
         )
 
     idxs = select_samples(ds, cfg.selection)
@@ -168,6 +209,7 @@ def run_attribution(cfg: AttributionConfig) -> list[dict[str, Any]]:
         value_fn = ConflictValueFn(
             model, sample["x"], agent, valid, device,
             target=cfg.game.target, target_idx=target_idx,
+            role_ids=sample.get("role_ids"),
         )
 
         t0 = time.time()
@@ -197,6 +239,15 @@ def run_attribution(cfg: AttributionConfig) -> list[dict[str, Any]]:
                     max_players=cfg.exact.max_players, cache=cache,
                 )
                 a_name = SLOT_NAMES[a] if a < len(SLOT_NAMES) else f"agent{a}"
+                labels = _agent_labels(sample)
+                if (
+                    a < len(labels)
+                    and int(labels[a].get("car_id", -1)) >= 0
+                ):
+                    a_name = (
+                        f"{labels[a]['local_index']}:{labels[a]['role']}:"
+                        f"{labels[a]['car_id']}"
+                    )
                 exact_out[a_name] = {
                     "players": [f"seg{s}" for s in segs],
                     "phi": [float(v) for v in er.phi],
@@ -206,14 +257,21 @@ def run_attribution(cfg: AttributionConfig) -> list[dict[str, Any]]:
                 }
             extra["exact"] = exact_out
 
-        result = event_result(meta, game_config, partition, readout_results, extra)
+        agent_labels = _agent_labels(sample)
+        result = event_result(
+            meta, game_config, partition, readout_results, extra,
+            agent_labels=agent_labels,
+        )
         result["elapsed_sec"] = round(time.time() - t0, 3)
+        result["n_players"] = len(partition.agents)
+        result["n_mc_forwards"] = int(value_fn.n_forwards)
         if cfg.output.save_per_event:
             save_event_json(out_dir / f"event_{eid}.json", result)
         all_rows.extend(summary_rows(result))
 
         p4 = max(abs(r.p4_residual) for r in readout_results.values())
         print(f"  [{count}/{len(idxs)}] event {eid}: cells={partition.n_cells}, "
+              f"players={len(partition.agents)}, "
               f"forwards={value_fn.n_forwards}, max|P4|={p4:.2e}, "
               f"{result['elapsed_sec']:.1f}s")
 

@@ -15,7 +15,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-from model_baseline.attribution.outputs import SLOT_NAMES
+from model_baseline.attribution.outputs import SLOT_NAMES, _agent_name
 
 
 def _mpl():
@@ -48,7 +48,16 @@ def plot_agent_segment_heatmap(
     r = result["readouts"][readout]
     agg = r["aggregations"]["agent_segment"]
     n_seg = len(result["seg_bounds"])
-    agents = [a for a in SLOT_NAMES if any(k.startswith(f"{a}/") for k in agg)]
+    if result.get("agents"):
+        agents = []
+        for i, _item in enumerate(result["agents"]):
+            name = _agent_name(i, result["agents"])
+            if any(k.startswith(f"{name}/") for k in agg):
+                agents.append(name)
+        if not agents:
+            agents = sorted({k.split("/")[0] for k in agg})
+    else:
+        agents = [a for a in SLOT_NAMES if any(k.startswith(f"{a}/") for k in agg)]
 
     m = np.zeros((len(agents), n_seg))
     for k, v in agg.items():
