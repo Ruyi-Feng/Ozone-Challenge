@@ -24,13 +24,17 @@ def load_config(path: Union[str, Path]) -> ProcessingConfig:
     train_val_ratio = split_cfg.get("train_val_ratio", None)
 
     rebalance_cfg = raw.get("rebalance", {})
+    pilot_cfg = raw.get("pilot", {})
 
     return ProcessingConfig(
         history_sec=float(time_cfg.get("history_sec", 8.0)),
         future_sec=float(time_cfg.get("future_sec", 3.0)),
         fps=float(time_cfg.get("fps", 25.0)),
         conflict_ttc_threshold=float(
-            time_cfg.get("conflict_ttc_threshold", 3.0)
+            time_cfg.get("conflict_ttc_threshold", 1.5)
+        ),
+        max_intersection_distance_m=float(
+            time_cfg.get("max_intersection_distance_m", 50.0)
         ),
         max_distance_m=float(neighbor_cfg.get("max_distance_m", 200.0)),
         neighbor_slots=tuple(
@@ -57,6 +61,9 @@ def load_config(path: Union[str, Path]) -> ProcessingConfig:
         ),
         rebalance_per_scene=bool(rebalance_cfg.get("per_scene", True)),
         rebalance_seed=int(rebalance_cfg.get("seed", 42)),
+        max_events_per_class_per_scene=int(
+            pilot_cfg.get("max_events_per_class_per_scene", 0)
+        ),
     )
 
 

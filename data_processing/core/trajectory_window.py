@@ -223,10 +223,13 @@ def build_windowed_events(
     car_index: dict | None = None,
 ) -> List[WindowedEventCandidate]:
     """Validate all candidates and keep only those with valid 8s + 3s windows."""
+    from data_processing.utils.progress import tqdm_bar
     from tqdm import tqdm
 
     windowed: List[WindowedEventCandidate] = []
-    for cand in tqdm(candidates, desc="  validating windows", unit="cand"):
+    for cand in tqdm(
+        candidates, desc="  validating windows", unit="cand", **tqdm_bar(leave=False, position=1)
+    ):
         built = build_windowed_candidate(raw_df, cand, cfg, car_index=car_index)
         if built is not None and built.history_ok and built.future_ok:
             windowed.append(built)

@@ -167,9 +167,12 @@ def write_csv_headers(cfg: ProcessingConfig) -> None:
         pd.DataFrame(columns=columns).to_csv(path, index=False)
 
 
-def write_csv_headers_split(cfg: ProcessingConfig) -> None:
-    """Initialize train/val output CSV files with column headers only."""
-    for suffix in ("train", "val"):
+def write_csv_headers_split(
+    cfg: ProcessingConfig,
+    suffixes: tuple[str, ...] = ("train", "val"),
+) -> None:
+    """Initialize split output CSV files with column headers only."""
+    for suffix in suffixes:
         for path, columns in [
             (cfg.data_out, DATA_COLUMNS),
             (cfg.label_out, LABEL_COLUMNS),

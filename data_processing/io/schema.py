@@ -145,7 +145,11 @@ class ProcessingConfig:
     history_sec: float = 8.0
     future_sec: float = 3.0
     fps: float = 25.0
-    conflict_ttc_threshold: float = 3.0  # 2D_TTC below this → conflict
+    conflict_ttc_threshold: float = 1.5  # 2D_TTC below this → conflict
+    # Future heading-ray / TTC-extrapolated meeting point must lie within
+    # this distance of BOTH current vehicle centres, otherwise the TTC is
+    # treated as invalid (far-ahead false positives).
+    max_intersection_distance_m: float = 50.0
     max_distance_m: float = 200.0
     neighbor_slots: tuple[str, ...] = NEIGHBOR_SLOTS
     train_val_split_ratio: float | None = None  # None → no split; 0.8 → 80/20 train/val
@@ -160,3 +164,6 @@ class ProcessingConfig:
     rebalance_balance_conflict_types: bool = False
     rebalance_per_scene: bool = True
     rebalance_seed: int = 42
+    # Optional pilot-only cap applied after history/future validation.
+    # Zero keeps every event (the production/default behaviour).
+    max_events_per_class_per_scene: int = 0

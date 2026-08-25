@@ -321,6 +321,7 @@ def _precompute_frame_neighbors(
     are in ego's neighbor slots at frame *f*" in O(1) without recomputing
     distances / headings / slot classification.
     """
+    from data_processing.utils.progress import tqdm_bar
     from tqdm import tqdm
 
     cache: FrameNeighborCache = {}
@@ -344,6 +345,7 @@ def _precompute_frame_neighbors(
         scene_frames,
         desc="  precomputing frame neighbors",
         unit="frm",
+        **tqdm_bar(leave=False, position=1),
     ):
         scene_key = (str(scene), int(fnum))
 
@@ -531,12 +533,13 @@ def extract_neighbors_for_events(
     Pass *neighbor_cache* to reuse a previously computed cache across
     multiple calls (e.g. chunked processing).
     """
+    from data_processing.utils.progress import tqdm_bar
     from tqdm import tqdm
 
     if frame_index is None:
         # Fallback: no pre-computation possible
         results: List[TrackedNeighborhoodEvent] = []
-        for w in tqdm(windows, desc="  extracting neighbors", unit="evt"):
+        for w in tqdm(windows, desc="  extracting neighbors", unit="evt", **tqdm_bar(leave=False, position=1)):
             results.append(extract_neighbors_for_event(
                 raw_df, w, cfg,
                 frame_index=frame_index, car_index=car_index,
@@ -548,7 +551,7 @@ def extract_neighbors_for_events(
         neighbor_cache = _precompute_frame_neighbors(frame_index, cfg)
 
     results: List[TrackedNeighborhoodEvent] = []
-    for w in tqdm(windows, desc="  extracting neighbors", unit="evt"):
+    for w in tqdm(windows, desc="  extracting neighbors", unit="evt", **tqdm_bar(leave=False, position=1)):
         results.append(extract_neighbors_for_event(
             raw_df, w, cfg,
             frame_index=frame_index, car_index=car_index,

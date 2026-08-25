@@ -22,6 +22,38 @@ def get_track_time_span(track_df: pd.DataFrame, time_col: str = "timestamp") -> 
     return float(track_df[time_col].min()), float(track_df[time_col].max())
 
 
+def downsample_frames_to_10fps(
+    df: pd.DataFrame,
+    source_fps: float = 25.0,
+) -> pd.DataFrame:
+    """Resample a standard-format trajectory table onto a 10 Hz frame index.
+
+    25 Hz uses the existing keep-rule ``frameNum % 5 ∈ {0, 2}``. Other rates
+    keep every ``round(source_fps / 10)``-th unique frame. Frame numbers are
+    then rewritten to a dense 0..N sequence so that ``fps=10`` windowing in
+    the conflict pipeline stays consistent.
+    """
+    if df.empty:
+        return df
+    if abs(float(source_fps) - 10.0) < 0.51:
+        return df
+
+    out = df.copy()
+    if abs(float(source_fps) - 25.0) < 1.0:
+        mask = (out["frameNum"] % 5 == 0) | (out["frameNum"] % 5 == 2)
+        out = out.loc[mask].copy()
+    else:
+        step = max(1, int(round(float(source_fps) / 10.0)))
+        kept = sorted(out["frameNum"].unique())
+        keep_set = set(kept[::step])
+        out = out.loc[out["frameNum"].isin(keep_set)].copy()
+
+    kept_frames = sorted(out["frameNum"].unique())
+    frame_map = {old: new for new, old in enumerate(kept_frames)}
+    out["frameNum"] = out["frameNum"].map(frame_map)
+    return out
+
+
 def has_continuous_coverage(
     timestamps: Iterable[float],
     t_start: float,

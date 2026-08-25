@@ -5,7 +5,9 @@ OBB (Oriented Bounding Box) geometry, following the NBDT *ssm.py*
 reference implementation (``_compute_2d_ttc_bbox`` and helpers).
 
 A pair (ego, target) is in conflict when 2D_TTC drops below
-*conflict_ttc_threshold* for one or more consecutive frames.
+*conflict_ttc_threshold* (default 1.5 s) AND the predicted future
+trajectory intersection lies within *max_intersection_distance_m*
+(default 50 m) of both current vehicle centres.
 """
 
 from __future__ import annotations
@@ -316,6 +318,82 @@ def _project_to_line(
     return speed * math.cos(delta), accel * math.cos(delta)
 
 
+def _forward_heading_ray_intersection(
+    p1: Point, heading1_deg: float,
+    p2: Point, heading2_deg: float,
+) -> Optional[Point]:
+    """Intersection of two *forward* heading rays from vehicle centres.
+
+    Returns None when the headings are parallel or the crossing lies behind
+    at least one vehicle.
+    """
+    rad1 = math.radians(heading1_deg)
+    rad2 = math.radians(heading2_deg)
+    d1x, d1y = math.cos(rad1), math.sin(rad1)
+    d2x, d2y = math.cos(rad2), math.sin(rad2)
+    cross = d1x * d2y - d1y * d2x
+    if abs(cross) < 1e-12:
+        return None
+    dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+    t = (dx * d2y - dy * d2x) / cross
+    s = (dx * d1y - dy * d1x) / cross
+    if t < -1e-6 or s < -1e-6:
+        return None
+    return (p1[0] + t * d1x, p1[1] + t * d1y)
+
+
+def _ttc_extrapolated_meeting_point(
+    p1: Point, heading1_deg: float, speed1: float,
+    p2: Point, heading2_deg: float, speed2: float,
+    ttc: float,
+) -> Point:
+    """Midpoint of constant-heading, constant-speed positions at time *ttc*."""
+    rad1 = math.radians(heading1_deg)
+    rad2 = math.radians(heading2_deg)
+    f1x = p1[0] + speed1 * ttc * math.cos(rad1)
+    f1y = p1[1] + speed1 * ttc * math.sin(rad1)
+    f2x = p2[0] + speed2 * ttc * math.cos(rad2)
+    f2y = p2[1] + speed2 * ttc * math.sin(rad2)
+    return ((f1x + f2x) / 2.0, (f1y + f2y) / 2.0)
+
+
+def _future_intersection_within(
+    ego_xy: Point,
+    ego_heading_deg: float,
+    ego_speed: float,
+    tgt_xy: Point,
+    tgt_heading_deg: float,
+    tgt_speed: float,
+    ttc: float,
+    max_distance_m: float,
+) -> bool:
+    """True iff the predicted future meeting point is within *max_distance_m*
+    of **both** current vehicle centres.
+
+    Crossing traffic uses the heading-ray intersection (the geometric path
+    crossing). Nearly-parallel / rear-end pairs have no ray crossing, so the
+    TTC-extrapolated midpoint is used instead.
+    """
+    if max_distance_m <= 0:
+        return True
+    if ttc <= _EPS:
+        return True
+
+    point = _forward_heading_ray_intersection(
+        ego_xy, ego_heading_deg, tgt_xy, tgt_heading_deg,
+    )
+    if point is None:
+        point = _ttc_extrapolated_meeting_point(
+            ego_xy, ego_heading_deg, ego_speed,
+            tgt_xy, tgt_heading_deg, tgt_speed,
+            ttc,
+        )
+
+    d_ego = math.hypot(point[0] - ego_xy[0], point[1] - ego_xy[1])
+    d_tgt = math.hypot(point[0] - tgt_xy[0], point[1] - tgt_xy[1])
+    return d_ego <= max_distance_m and d_tgt <= max_distance_m
+
+
 def _compute_2d_ttc_kernel(
     point1: Point,
     point2: Point,
@@ -417,6 +495,8 @@ def _compute_2d_ttc(
     ego_row: pd.Series,
     target_row: pd.Series,
     dt: float,
+    *,
+    max_intersection_distance_m: float = 50.0,
 ) -> Optional[float]:
     """Compute 2D_TTC for an ego-target pair at a single frame.
 
@@ -424,6 +504,8 @@ def _compute_2d_ttc(
     1. ``calculate_nearest_points`` → p_ego, p_tgt, distance
     2. ``_rear_forward_strips_intersect`` → geometric precondition
     3. ``_compute_2d_ttc_kernel`` → quadratic TTC
+    4. Future trajectory intersection must lie within
+       *max_intersection_distance_m* of both current centres.
 
     Returns TTC in seconds, or None.
     """
@@ -452,7 +534,21 @@ def _compute_2d_ttc(
     param1 = (ego_speed, ego_accel, ego_hdg, ego_w)
     param2 = (tgt_speed, tgt_accel, tgt_hdg, tgt_w)
 
-    return _compute_2d_ttc_kernel(p_ego, p_tgt, dist, param1, param2)
+    ttc = _compute_2d_ttc_kernel(p_ego, p_tgt, dist, param1, param2)
+    if ttc is None:
+        return None
+
+    # 4. Reject TTC whose predicted meeting point is too far away
+    ego_xy = (float(ego_row["carCenterXm"]), float(ego_row["carCenterYm"]))
+    tgt_xy = (float(target_row["carCenterXm"]), float(target_row["carCenterYm"]))
+    if not _future_intersection_within(
+        ego_xy, ego_hdg, ego_speed,
+        tgt_xy, tgt_hdg, tgt_speed,
+        ttc,
+        max_intersection_distance_m,
+    ):
+        return None
+    return ttc
 
 
 # ---------------------------------------------------------------------------
@@ -641,6 +737,7 @@ def _detect_conflicts_one_scene(
     df = raw_df.sort_values(["frameNum", "carId"]).reset_index(drop=True)
     frames = df.groupby("frameNum")
 
+    from data_processing.utils.progress import tqdm_bar
     from tqdm import tqdm
 
     # Per-pair 2D_TTC time series:  (ego, target) → [(frameNum, 2D_TTC), ...]
@@ -648,11 +745,16 @@ def _detect_conflicts_one_scene(
 
     n_frames_total = len(frames)
     print(f"  Stage 1/4: conflict detection — {n_frames_total} frames, "
-          f"fps={cfg.fps}, TTC<{cfg.conflict_ttc_threshold}s"
+          f"fps={cfg.fps}, TTC<{cfg.conflict_ttc_threshold}s, "
+          f"intersect<={cfg.max_intersection_distance_m}m"
           f"{' (scene ' + scene_id + ')' if scene_id != 'scene' else ''}")
 
     for frame_num, frame_df in tqdm(
-        frames, total=n_frames_total, desc="  scanning frames", unit="frm"
+        frames,
+        total=n_frames_total,
+        desc="  scanning frames",
+        unit="frm",
+        **tqdm_bar(leave=False, position=1),
     ):
         front_pairs = _find_front_pairs(frame_df, cfg)
 
@@ -669,7 +771,10 @@ def _detect_conflicts_one_scene(
                 continue
             ego_row = frame_df.iloc[ego_pos]
             tgt_row = frame_df.iloc[tgt_pos]
-            ttc = _compute_2d_ttc(ego_row, tgt_row, dt)
+            ttc = _compute_2d_ttc(
+                ego_row, tgt_row, dt,
+                max_intersection_distance_m=cfg.max_intersection_distance_m,
+            )
             pair_series.setdefault(key, []).append((int(frame_num), ttc))
 
     # Extract continuous conflict intervals
