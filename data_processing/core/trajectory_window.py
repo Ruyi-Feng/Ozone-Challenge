@@ -230,4 +230,86 @@ def build_windowed_events(
         built = build_windowed_candidate(raw_df, cand, cfg, car_index=car_index)
         if built is not None and built.history_ok and built.future_ok:
             windowed.append(built)
+
+    if cfg.min_sample_gap_sec > 0:
+        before = len(windowed)
+        windowed = enforce_min_sample_gap(
+            windowed, cfg.min_sample_gap_sec, cfg.fps
+        )
+        print(f"  → min-sample-gap filter: {before} → {len(windowed)} windows")
+    if cfg.rebalance_enabled:
+        before = len(windowed)
+        windowed = rebalance_windows_by_class(
+            windowed, cfg.rebalance_target_ratio, cfg.rebalance_seed
+        )
+        print(f"  → post-gap rebalance: {before} → {len(windowed)} windows")
     return windowed
+
+
+def enforce_min_sample_gap(
+    windows: List[WindowedEventCandidate],
+    min_gap_sec: float,
+    fps: float,
+) -> List[WindowedEventCandidate]:
+    """Keep windows so same (scene_id, ego_id) samples are ≥ *min_gap_sec* apart.
+
+    Greedy per ego: sort by t0, keep the first, then skip any window whose t0
+    is within *min_gap_sec* of the last kept one.
+    """
+    if min_gap_sec <= 0:
+        return windows
+    min_gap_frames = _sec2frames(min_gap_sec, fps)
+    from collections import defaultdict
+    by_ego: dict = defaultdict(list)
+    for w in windows:
+        by_ego[(w.scene_id, w.ego_id)].append(w)
+
+    kept: List[WindowedEventCandidate] = []
+    for ws in by_ego.values():
+        ws.sort(key=lambda w: w.t0)
+        last_t0: Optional[float] = None
+        for w in ws:
+            if last_t0 is None or (w.t0 - last_t0) >= min_gap_frames:
+                kept.append(w)
+                last_t0 = w.t0
+    return kept
+
+
+def rebalance_windows_by_class(
+    windows: List[WindowedEventCandidate],
+    ratio: float,
+    seed: int,
+) -> List[WindowedEventCandidate]:
+    """Downsample the over-represented class (conflict vs non-conflict) per scene.
+
+    ``enforce_min_sample_gap`` removes more conflict samples than non-conflict
+    (conflicts cluster on few egos), breaking the Stage-1 1:1 balance.  This
+    restores ``ratio`` by randomly downsampling the larger class within each
+    scene.  Only ever removes — never upsamples.  Scenes missing one class are
+    passed through unchanged.
+    """
+    if ratio <= 0:
+        return windows
+    from collections import defaultdict
+    import random
+
+    by_scene: dict = defaultdict(lambda: {"c": [], "n": []})
+    for w in windows:
+        by_scene[w.scene_id]["c" if w.is_conflict else "n"].append(w)
+
+    rng = random.Random(seed)
+    out: List[WindowedEventCandidate] = []
+    for groups in by_scene.values():
+        c, n = groups["c"], groups["n"]
+        if not c or not n:
+            out.extend(c + n)
+            continue
+        n_c, n_n = len(c), len(n)
+        target_c = n_n * ratio
+        if n_c > target_c:
+            out.extend(rng.sample(c, round(target_c)))
+            out.extend(n)
+        else:
+            out.extend(c)
+            out.extend(rng.sample(n, round(n_c / ratio)))
+    return out

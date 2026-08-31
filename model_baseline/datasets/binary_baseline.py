@@ -64,7 +64,7 @@ class BinaryBaselineDataset(Dataset):
         split: str = "train",
         future_path: Optional[str] = None,
         num_agents: int = 7,
-        num_features: int = 4,
+        num_features: int = 12,
         num_frames: Optional[int] = None,
         fps: float = 10.0,
         history_sec: float = 8.0,

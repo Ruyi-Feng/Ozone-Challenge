@@ -3,9 +3,11 @@ time:
   future_sec: 3.0
   fps: 10.0  # unified 10 Hz for all datasets (inD, CitySim, NGSIM)
   conflict_ttc_threshold: 1.5
+  min_sample_gap_sec: 11.0  # min spacing between same-ego samples (history + future)
+  min_duration_frames: 3    # consecutive TTC<threshold frames to count as conflict
 
 neighbor:
-  max_distance_m: 200.0
+  max_distance_m: 80.0
   slots:
     - front
     - rear

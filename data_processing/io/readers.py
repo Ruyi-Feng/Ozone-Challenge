@@ -33,6 +33,8 @@ def load_config(path: Union[str, Path]) -> ProcessingConfig:
         conflict_ttc_threshold=float(
             time_cfg.get("conflict_ttc_threshold", 3.0)
         ),
+        min_sample_gap_sec=float(time_cfg.get("min_sample_gap_sec", 0.0)),
+        min_duration_frames=int(time_cfg.get("min_duration_frames", 1)),
         max_distance_m=float(neighbor_cfg.get("max_distance_m", 200.0)),
         neighbor_slots=tuple(
             neighbor_cfg.get(

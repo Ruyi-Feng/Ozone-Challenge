@@ -18,7 +18,7 @@ class ModelConfig:
     # "best_model.pt" (original behaviour).
     tag: str = ""
     num_agents: int = 7
-    num_features: int = 4
+    num_features: int = 12
     hidden_dim: int = 64
     num_frames: Optional[int] = None
     # Transformer-only knobs (ignored by LSTM baseline)
@@ -128,7 +128,7 @@ def load_config(path: str | Path) -> BaselineRuntimeConfig:
             name=m.get("name", "baseline"),
             tag=str(m.get("tag", "") or "").strip(),
             num_agents=int(m.get("num_agents", 7)),
-            num_features=int(m.get("num_features", 4)),
+            num_features=int(m.get("num_features", 12)),
             hidden_dim=int(m.get("hidden_dim", 64)),
             num_frames=m.get("num_frames"),
             n_layers=int(m.get("n_layers", 2)),

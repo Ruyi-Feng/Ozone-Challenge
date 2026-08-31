@@ -130,7 +130,7 @@ def build_partition(
     valid_mask: np.ndarray,
     agent_mask: np.ndarray,
     spec: SegmentSpec,
-    num_features: int = 4,
+    num_features: int = 12,
 ) -> CellPartition:
     """Build the cell partition for one event.
 
@@ -305,7 +305,7 @@ class TrainingMaskSampler:
     def __init__(
         self,
         cfg: MaskSamplerConfig,
-        num_features: int = 4,
+        num_features: int = 12,
         seed: int | np.random.SeedSequence = 0,
     ) -> None:
         self.cfg = cfg

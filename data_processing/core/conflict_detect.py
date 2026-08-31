@@ -679,7 +679,7 @@ def _detect_conflicts_one_scene(
             fnum for fnum, ttc in records
             if ttc is not None and ttc < cfg.conflict_ttc_threshold
         ]
-        events = _group_into_events(conflict_frames)
+        events = _group_into_events(conflict_frames, cfg.min_duration_frames)
         for evt in events:
             candidates.append(ConflictCandidate(
                 scene_id=scene_id,

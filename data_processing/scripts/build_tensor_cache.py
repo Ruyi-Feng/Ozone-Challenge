@@ -5,7 +5,7 @@ writes fixed-size [N, A, T, F] float32 arrays + labels via numpy memmap.
 The resulting dataset loads in < 1 second via mmap with zero-copy indexing.
 
 Produces:
-  data/processed/train_x.npy        float32 [N, 7, 80, 4]
+  data/processed/train_x.npy        float32 [N, 7, 80, 12]
   data/processed/train_mask.npy     bool     [N, 7]
   data/processed/train_y.npy        float32 [N]        (is_conflict)
   data/processed/train_target.npy   int64    [N]        (target_idx)
@@ -75,7 +75,7 @@ TASKS = [
 
 NUM_AGENTS = 7
 NUM_FRAMES = 80
-NUM_FEATURES = 4
+NUM_FEATURES = 12  # dx, dy, heading_rel, speed + 8 OBB corners (meters, ego-relative)
 
 SLOT_ORDER = (
     "ego", "front", "rear",
@@ -194,6 +194,15 @@ def build_tensor(
                 float(row["heading"]), ego_h0
             )
             x[slot_idx, out_t, 3] = float(row["speed"])
+            # OBB corners (meters), relative to ego center — V1
+            x[slot_idx, out_t, 4] = float(row["boundingBox1Xm"]) - ego_x0
+            x[slot_idx, out_t, 5] = float(row["boundingBox1Ym"]) - ego_y0
+            x[slot_idx, out_t, 6] = float(row["boundingBox2Xm"]) - ego_x0
+            x[slot_idx, out_t, 7] = float(row["boundingBox2Ym"]) - ego_y0
+            x[slot_idx, out_t, 8] = float(row["boundingBox3Xm"]) - ego_x0
+            x[slot_idx, out_t, 9] = float(row["boundingBox3Ym"]) - ego_y0
+            x[slot_idx, out_t, 10] = float(row["boundingBox4Xm"]) - ego_x0
+            x[slot_idx, out_t, 11] = float(row["boundingBox4Ym"]) - ego_y0
             valid[slot_idx, out_t] = True
 
     # 6. Target index

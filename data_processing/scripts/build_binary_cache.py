@@ -6,9 +6,9 @@ Reads the pre-computed memmap .npy arrays and writes:
   - {prefix}_valid.bin  — bit-packed per-frame validity, if {prefix}_valid.npy
                           exists (see build_tensor_cache.py)
 
-The binary format is simply concatenated float32 [7, 80, 4] tensors.
-Each event occupies exactly 7 × 80 × 4 × 4 = 8960 bytes.
-The byte offset of event N is N × 8960.
+The binary format is simply concatenated float32 [7, 80, 12] tensors.
+Each event occupies exactly 7 × 80 × 12 × 4 = 26880 bytes.
+The byte offset of event N is N × 26880.
 valid.bin packs the [7, 80] bool mask of event N into 70 bytes at N × 70.
 
 Usage (from repo root):
@@ -38,8 +38,8 @@ TASKS = [
 
 NUM_AGENTS = 7
 NUM_FRAMES = 80
-NUM_FEATURES = 4
-RECORD_BYTES = NUM_AGENTS * NUM_FRAMES * NUM_FEATURES * 4  # 8960
+NUM_FEATURES = 12
+RECORD_BYTES = NUM_AGENTS * NUM_FRAMES * NUM_FEATURES * 4  # 26880
 VALID_RECORD_BYTES = (NUM_AGENTS * NUM_FRAMES + 7) // 8  # 70
 
 

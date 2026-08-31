@@ -49,6 +49,15 @@ DATA_COLUMNS: list[str] = [
     "carCenterYm",
     "heading",
     "speed",
+    # OBB corners (meters) — V1
+    "boundingBox1Xm",
+    "boundingBox1Ym",
+    "boundingBox2Xm",
+    "boundingBox2Ym",
+    "boundingBox3Xm",
+    "boundingBox3Ym",
+    "boundingBox4Xm",
+    "boundingBox4Ym",
 ]
 
 LABEL_COLUMNS: list[str] = [
@@ -71,6 +80,15 @@ FUTURE_TRAJ_COLUMNS: list[str] = [
     "carCenterYm",
     "heading",
     "speed",
+    # OBB corners (meters) — V1
+    "boundingBox1Xm",
+    "boundingBox1Ym",
+    "boundingBox2Xm",
+    "boundingBox2Ym",
+    "boundingBox3Xm",
+    "boundingBox3Ym",
+    "boundingBox4Xm",
+    "boundingBox4Ym",
     "role",
 ]
 
@@ -146,6 +164,8 @@ class ProcessingConfig:
     future_sec: float = 3.0
     fps: float = 25.0
     conflict_ttc_threshold: float = 3.0  # 2D_TTC below this → conflict
+    min_sample_gap_sec: float = 0.0  # min t0 spacing between same-ego samples (0 = off)
+    min_duration_frames: int = 1    # consecutive TTC<threshold frames → conflict
     max_distance_m: float = 200.0
     neighbor_slots: tuple[str, ...] = NEIGHBOR_SLOTS
     train_val_test_ratio: tuple[float, float, float] | None = None  # (0.8, 0.1, 0.1) → 80/10/10

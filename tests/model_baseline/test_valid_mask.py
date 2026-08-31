@@ -59,6 +59,15 @@ def _rows(event_id, car_id, role, frames):
             "carCenterYm": 200.0 + car_id + 0.05 * fn,
             "heading": 15.0 + car_id,
             "speed": 10.0 + car_id,
+            # OBB corners (V1): present so build_tensor fills F=12
+            "boundingBox1Xm": 100.0 + car_id + 0.1 * fn + 2.0,
+            "boundingBox1Ym": 200.0 + car_id + 0.05 * fn + 1.0,
+            "boundingBox2Xm": 100.0 + car_id + 0.1 * fn - 2.0,
+            "boundingBox2Ym": 200.0 + car_id + 0.05 * fn + 1.0,
+            "boundingBox3Xm": 100.0 + car_id + 0.1 * fn - 2.0,
+            "boundingBox3Ym": 200.0 + car_id + 0.05 * fn - 1.0,
+            "boundingBox4Xm": 100.0 + car_id + 0.1 * fn + 2.0,
+            "boundingBox4Ym": 200.0 + car_id + 0.05 * fn - 1.0,
         }
         for fn in frames
     ]

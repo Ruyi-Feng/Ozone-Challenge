@@ -16,7 +16,7 @@ Sample contract (consumed by BaselineConflictModel):
 
 Agent axis A is ordered as:
   [ego, front, rear, left_front, left_rear, right_front, right_rear]
-Features F: [dx, dy, heading_rel, speed]  relative to ego @ t₀.
+Features F: [dx, dy, heading_rel, speed, 8 OBB corners]  relative to ego @ t₀.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ class BaselineConflictDataset(Dataset):
         split: str = "train",
         future_path: Optional[str] = None,
         num_agents: int = 7,
-        num_features: int = 4,
+        num_features: int = 12,
         num_frames: Optional[int] = None,
         fps: float = 10.0,
         history_sec: float = 8.0,

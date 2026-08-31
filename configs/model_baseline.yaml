@@ -12,7 +12,7 @@ model:
   name: baseline          # registry key → dataset form + network
   tag: lstm               # unique run ID → checkpoints/lstm_best_model.pt
   num_agents: 7           # ego + 6 neighbor slots
-  num_features: 4         # e.g. dx, dy, heading_rel, speed
+  num_features: 12         # e.g. dx, dy, heading_rel, speed
   hidden_dim: 64          # LSTM hidden / Transformer d_model
   num_frames: 80          # 10 fps × 8 s history
   # n_layers: 2           # Transformer encoder layers

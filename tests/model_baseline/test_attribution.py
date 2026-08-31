@@ -189,7 +189,7 @@ def test_exact_shapley_and_game():
 # Real model integration
 # ---------------------------------------------------------------------------
 
-A, T, F = 7, 80, 4
+A, T, F = 7, 80, 12
 
 
 def _tiny_model() -> TransformerConflictModel:
